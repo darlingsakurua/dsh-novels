@@ -40,8 +40,9 @@ Keeping the sheet in `head` makes it independent of whichever view is mounted.
 ## Install
 
 ```powershell
-# from the DSH profile that should carry the plugin
-plugin_manager install_bundle target="D:\插件\dsh-novels"
+# clone once, then install from the DSH profile that should carry the plugin
+git clone https://github.com/darlingsakurua/dsh-novels.git
+plugin_manager install_bundle target="<path-to-your-clone>"
 ```
 
 The bundle is linked (not copied), so edits under `client/` and `lib/` apply
@@ -153,3 +154,7 @@ These cannot be automated from here (the sandbox cannot start a browser):
 - Styles use `--dsw-alias-*` tokens only — no literal colors.
 - Keyboard shortcuts live on the reader container, never on `window`.
 - The API prefix is `/dsh-novels/api/v1`; `/api` belongs to the connection channel.
+
+## License
+
+[MIT](LICENSE) © 2026 darlingsakurua
