@@ -1,0 +1,37 @@
+# ===== 依赖 =====
+node_modules/
+
+# ===== 日志 =====
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== 测试临时产物 =====
+_test/tmp/
+_test/**/tmp/
+
+# ===== 构建产物 =====
+dist/
+build/
+*.tsbuildinfo
+
+# ===== 本地环境变量 =====
+.env
+.env.local
+
+# ===== 不对外分发 =====
+# 开发期分析脚本 + DSH 官方客户端包解包源码，含第三方内容
+_tools/
+# 开发计划书，含本机绝对路径
+插件.md
