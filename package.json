@@ -1,9 +1,27 @@
 {
   "name": "dsh-novels",
   "version": "0.1.0",
-  "private": true,
+  "description": "Read .txt novels inside DeepSeek Harness: import a file, get chapters split automatically, and read it in a panel next to the conversation.",
+  "license": "MIT",
+  "author": "darlingsakurua",
   "type": "module",
-  "description": "Read .txt novels inside DeepSeek Harness: upload, auto chapter split, resume where you left off.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "novel",
+    "txt",
+    "reader"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darlingsakurua/dsh-novels.git"
+  },
+  "homepage": "https://github.com/darlingsakurua/dsh-novels#readme",
+  "bugs": {
+    "url": "https://github.com/darlingsakurua/dsh-novels/issues"
+  },
   "exports": {
     ".": "./lib/index.mjs",
     "./client": "./client/index.mjs",
@@ -16,7 +34,12 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "icon-180.png",
+    "docs",
+    "screenshots.json",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
