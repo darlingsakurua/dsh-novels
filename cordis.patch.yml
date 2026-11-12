@@ -1,0 +1,4 @@
+# dsh-novels bundle patch: one Host row; the Client half rides `dsh.client` in package.json.
+- insert:
+    - id: dsh-novels
+      name: 'dsh-novels'

@@ -1,0 +1,30 @@
+{
+  "name": "dsh-novels",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read .txt novels inside DeepSeek Harness: upload, auto chapter split, resume where you left off.",
+  "exports": {
+    ".": "./lib/index.mjs",
+    "./client": "./client/index.mjs",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}
