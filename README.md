@@ -3,6 +3,8 @@
 Read `.txt` novels inside DeepSeek Harness: import a file, get chapters split
 automatically, and read it in a panel next to the conversation.
 
+<img width="900" alt="Novel shelf inside DeepSeek Harness" src="docs/shelf.jpg">
+
 Status: **Phase 2/3 complete** — upload, shelf, reader, progress restore, rename,
 delete, reader prefs (font size, line height, page width), upload progress,
 long-book table-of-contents grouping, empty/error/loading states.
