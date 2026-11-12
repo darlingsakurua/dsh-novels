@@ -7,9 +7,10 @@ automatically, and read it in a panel next to the conversation.
 
 <img width="900" alt="Novel shelf inside DeepSeek Harness" src="docs/shelf.jpg">
 
-Status: **Phase 2/3 complete** — upload, shelf, reader, progress restore, rename,
-delete, reader prefs (font size, line height, page width), upload progress,
-long-book table-of-contents grouping, empty/error/loading states.
+Status: **0.1.3** — upload, shelf, reader, progress restore, rename, delete,
+reader prefs (font size, line height, page width), upload progress, long-book
+table-of-contents grouping, empty/error/loading states, and **show or open the
+folder that holds your uploaded files**.
 
 Features:
 
@@ -17,6 +18,11 @@ Features:
 - Automatic chapter split with a 4000-character block fallback.
 - Shelf cards show chapter/character counts, encoding, reading progress bar and
   "读到第 N 章"; rename in place; delete with confirmation.
+- Storage row above the shelf shows the absolute data folder and opens it; each
+  card has a **Location** button that reveals (and selects) that book's `.txt` in
+  the OS file manager. The browser cannot do this itself, so the Host spawns
+  `explorer.exe /select,…` (Windows), `open -R` (macOS) or `xdg-open` (Linux). The
+  client only posts the book id — never a path.
 - Reader: table of contents, previous/next chapter, font size, line height, page
   width, keyboard (← → PageUp PageDown Space j k Esc Ctrl±), chapter counter and
   a bottom progress line.
@@ -99,6 +105,8 @@ carry the browser session the shell already forwards).
 | PATCH | `/books/{id}` | rename (`{title, author}`) |
 | PATCH | `/books/{id}/progress` | `{chapterIndex, offsetChars, percent}` |
 | DELETE | `/books/{id}` | remove book and its files |
+| POST | `/reveal` | open the `books/` folder in the OS file manager |
+| POST | `/books/{id}/reveal` | reveal + select that book's `.txt` |
 | PATCH | `/prefs` | `{fontSize, lineHeight, measure, fontFamily}` |
 
 Envelopes are `{ok: true, ...}` or `{ok: false, error, message}`; request bodies

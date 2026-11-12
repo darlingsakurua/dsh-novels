@@ -6,13 +6,14 @@
 
 <img width="900" alt="DeepSeek Harness 中的书架界面" src="docs/shelf.jpg">
 
-状态：**Phase 2/3 已完成** —— 导入、书架、阅读器、进度恢复、改名、删除、阅读偏好（字号、行距、页宽）、上传进度、长书目录分组、空/错误/加载状态。
+状态：**0.1.3** —— 导入、书架、阅读器、进度恢复、改名、删除、阅读偏好（字号、行距、页宽）、上传进度、长书目录分组、空/错误/加载状态，以及**查看 / 直接打开已上传文件所在位置**。
 
 ## 功能
 
 - 点击按钮或拖拽导入 `.txt`；上限 20 MB，支持 UTF-8 / BOM / GB18030 / GBK / Big5 / UTF-16。
 - 自动分章，无法识别章节标记时按 4000 字切块。
 - 书架卡片显示章节数、字数、编码、阅读进度条和「读到第 N 章」；可就地改名；删除带确认。
+- 书架上方一行显示数据的绝对路径并可一键打开；每张卡片有「位置」按钮，在系统文件管理器里定位并选中这本书的 `.txt`。浏览器本身做不到，所以由 Host 起 `explorer.exe /select,…`（Windows）、`open -R`（macOS）或 `xdg-open`（Linux）；客户端只提交书 id，不传路径。
 - 阅读器：目录、上一章 / 下一章、字号、行距、页宽、键盘操作（← → PageUp PageDown 空格 j k Esc Ctrl±）、章节计数、底部进度条。
 - 阅读位置（章节 + 滚动偏移）和阅读偏好持久化在 Host 端，刷新和重启都不会丢。`/api` 端口每次启动都会变，所以客户端不保存任何自身状态。
 - 超过 300 章的长书会启用分组目录（每 100 章一块，只展开当前所在的块）。
@@ -80,6 +81,8 @@ books/<id>.chapters.json  [{i, title, start}]
 | PATCH | `/books/{id}` | 改名（`{title, author}`） |
 | PATCH | `/books/{id}/progress` | `{chapterIndex, offsetChars, percent}` |
 | DELETE | `/books/{id}` | 删除书籍及其文件 |
+| POST | `/reveal` | 在系统文件管理器中打开 `books/` 目录 |
+| POST | `/books/{id}/reveal` | 定位并选中该书的 `.txt` |
 | PATCH | `/prefs` | `{fontSize, lineHeight, measure, fontFamily}` |
 
 响应信封统一为 `{ok: true, ...}` 或 `{ok: false, error, message}`；请求体上限：上传 24 MB，其余 64 KB。客户端在读取前就会拒绝超过 20 MB 的文件；Host 端的余量留给 JSON 信封（正文 + 章节偏移）。

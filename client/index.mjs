@@ -97,6 +97,12 @@ window.__ModuleLoader__.load({
       deleteConfirm: '确定删除《{title}》？正文与章节记录都会移除。',
       unread: '未读',
       progressAt: '读到第 {chapter} 章',
+      reveal: '位置',
+      revealDir: '打开文件夹',
+      revealHint: '在文件管理器中显示这本书的 txt',
+      storageAt: '存储位置',
+      storageHint: '已上传的 txt 与章节索引都存在这里',
+      revealFailed: '无法打开文件管理器',
     }
 
     const en = {
@@ -142,6 +148,12 @@ window.__ModuleLoader__.load({
       deleteConfirm: 'Delete “{title}”? Its text and chapter map will be removed.',
       unread: 'Unread',
       progressAt: 'Chapter {chapter}',
+      reveal: 'Location',
+      revealDir: 'Open folder',
+      revealHint: 'Show this book’s txt in the file manager',
+      storageAt: 'Stored in',
+      storageHint: 'Uploaded txt files and chapter maps live here',
+      revealFailed: 'Could not open the file manager',
     }
 
     /* ------------------------------------------------------- text pipeline -- */
@@ -470,6 +482,10 @@ window.__ModuleLoader__.load({
 .dnv-meta{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}
 .dnv-tag{border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:0 7px;line-height:1.7}
 .dnv-bookFoot{display:flex;align-items:center;gap:8px;margin-top:auto}
+.dnv-storage{display:flex;align-items:center;gap:8px;padding:8px 20px;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:11.5px;color:var(--dsw-alias-label-tertiary);min-height:30px}
+.dnv-storageLabel{flex:none;color:var(--dsw-alias-label-tertiary)}
+.dnv-storagePath{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsw-alias-font-mono,ui-monospace,monospace);font-size:11px;color:var(--dsw-alias-label-secondary);direction:rtl;text-align:left}
+.dnv-storageBtn{flex:none}
 .dnv-link{appearance:none;border:0;background:none;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer;padding:2px 0;text-decoration:underline;text-underline-offset:3px}
 .dnv-status{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary);padding:6px 0}
 .dnv-err{color:var(--dsw-alias-state-error-primary)}
@@ -538,7 +554,7 @@ window.__ModuleLoader__.load({
 
     /* --------------------------------------------------------------- shelf -- */
 
-    function BookCard({ book, t, onOpen, onDelete, onRename, busy }) {
+    function BookCard({ book, t, onOpen, onDelete, onRename, onReveal, busy }) {
       const [editing, setEditing] = React.useState(false)
       const [draft, setDraft] = React.useState('')
       const progress = book.progress ?? null
@@ -626,6 +642,17 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dnv-grow' }),
           h(
             'button',
+            {
+              type: 'button',
+              className: 'dnv-btn dnv-btn-ghost dnv-revealBtn',
+              title: book.filePath ? `${t('revealHint')}: ${book.filePath}` : t('revealHint'),
+              disabled: busy,
+              onClick: () => onReveal(book),
+            },
+            t('reveal'),
+          ),
+          h(
+            'button',
             { type: 'button', className: 'dnv-btn dnv-btn-ghost', disabled: busy, onClick: () => onDelete(book) },
             t('remove'),
           ),
@@ -633,7 +660,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function Shelf({ t, state, onUpload, onOpen, onDelete, onRename, onRefresh, busyBookId }) {
+    function Shelf({ t, state, onUpload, onOpen, onDelete, onRename, onReveal, onRevealDir, onRefresh, busyBookId }) {
       const [dragDepth, setDragDepth] = React.useState(0)
       const inputRef = React.useRef(null)
 
@@ -696,6 +723,22 @@ window.__ModuleLoader__.load({
         ),
         h(
           'div',
+          { className: 'dnv-storage' },
+          h('span', { className: 'dnv-storageLabel' }, t('storageAt')),
+          h('code', { className: 'dnv-storagePath', title: state.dataDir ?? '' }, state.dataDir ?? '—'),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dnv-btn dnv-btn-ghost dnv-storageBtn',
+              title: t('storageHint'),
+              onClick: onRevealDir,
+            },
+            t('revealDir'),
+          ),
+        ),
+        h(
+          'div',
           { className: `dnv-body${dropping ? ' dnv-body-drop' : ''}`, ...dropHandlers },
           state.error
             ? h(
@@ -728,6 +771,7 @@ window.__ModuleLoader__.load({
                       onOpen,
                       onDelete,
                       onRename,
+                      onReveal,
                     }),
                   ),
                 ),
@@ -1172,7 +1216,14 @@ window.__ModuleLoader__.load({
         setLibrary((state) => ({ ...state, loading: true }))
         const result = await fetchJson('library')
         if (result.ok && result.body?.ok) {
-          setLibrary({ loading: false, books: result.body.books ?? [], prefs: result.body.prefs ?? null, error: null, notice: notice ?? null })
+          setLibrary({
+            loading: false,
+            books: result.body.books ?? [],
+            prefs: result.body.prefs ?? null,
+            dataDir: result.body.dataDir ?? null,
+            error: null,
+            notice: notice ?? null,
+          })
         } else {
           setLibrary((state) => ({ ...state, loading: false, error: errorText(result) }))
         }
@@ -1332,8 +1383,33 @@ window.__ModuleLoader__.load({
         return task
       }, [])
 
-      const changePrefs = React.useCallback(async (patch) => {
-        setLibrary((state) => ({ ...state, prefs: { ...(state.prefs ?? {}), ...patch } }))
+      /**
+       * Ask the Host to reveal a file in the OS file manager. The browser cannot
+       * do this itself, and the Host derives the path from the book id, so the
+       * client never sends a path.
+       */
+      const revealBook = React.useCallback(
+        async (book) => {
+          try {
+            const result = await fetchJson(`books/${book.id}/reveal`, { method: 'POST' })
+            if (!result.ok || !result.body?.ok) throw new Error(result.body?.message ?? t('revealFailed'))
+          } catch (error) {
+            setLibrary((state) => ({ ...state, error: error instanceof Error ? error.message : t('revealFailed') }))
+          }
+        },
+        [t],
+      )
+
+      const revealStorage = React.useCallback(async () => {
+        try {
+          const result = await fetchJson('reveal', { method: 'POST' })
+          if (!result.ok || !result.body?.ok) throw new Error(result.body?.message ?? t('revealFailed'))
+        } catch (error) {
+          setLibrary((state) => ({ ...state, error: error instanceof Error ? error.message : t('revealFailed') }))
+        }
+      }, [t])
+
+      const changePrefs = React.useCallback(async (patch) => {        setLibrary((state) => ({ ...state, prefs: { ...(state.prefs ?? {}), ...patch } }))
         try {
           const result = await fetchJson('prefs', {
             method: 'PATCH',
@@ -1373,6 +1449,8 @@ window.__ModuleLoader__.load({
         onOpen: openBook,
         onDelete: deleteBook,
         onRename: renameBook,
+        onReveal: revealBook,
+        onRevealDir: revealStorage,
         onRefresh: () => loadLibrary(),
         busyBookId,
       })
