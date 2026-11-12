@@ -22,7 +22,6 @@ window.__ModuleLoader__.load({
 
     const NS = 'dsh-novels'
     const SLOT_ID = 'novels'
-    const VERSION = '0.1.0'
     /** Relative to `document.baseURI`, so the request stays same-origin. */
     const API_BASE = 'dsh-novels/api/v1'
     /** Product limit for one book (the Host allows a little more on the wire). */
