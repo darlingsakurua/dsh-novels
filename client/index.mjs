@@ -42,6 +42,8 @@ window.__ModuleLoader__.load({
     const FALLBACK_BLOCK_CHARS = 4000
     /** Floor for the measured reader height, so a broken host layout stays usable. */
     const MIN_READER_HEIGHT = 240
+    /** Two identical headings this close together are one chapter printed twice. */
+    const DUPLICATE_HEADING_WINDOW = 300
 
     /**
      * Height to pin on the reader root: from its own top edge to the bottom of
@@ -232,21 +234,106 @@ window.__ModuleLoader__.load({
         unique.push(chapter)
       }
 
-      if (!unique.length) return splitByLength(body)
-      if (unique[0].start > 0) unique.unshift({ title: '开篇', start: 0 })
+      // Many TXT files print the heading twice in a row ("第1章 X" on one line,
+      // then the same line again). The second copy is not a chapter; keeping it
+      // would either drop the real chapter as "too short" or leave the heading
+      // text inside the body.
+      const deduped = []
+      for (const chapter of unique) {
+        const previous = deduped[deduped.length - 1]
+        if (
+          previous &&
+          previous.title === chapter.title &&
+          chapter.start - previous.start <= DUPLICATE_HEADING_WINDOW
+        ) {
+          continue
+        }
+        deduped.push(chapter)
+      }
+
+      if (!deduped.length) return splitByLength(body)
+      if (deduped[0].start > 0) deduped.unshift({ title: '开篇', start: 0 })
 
       // A heading followed by almost nothing is usually a false positive (a
       // table of contents, a stray subtitle). Dropping it lets the previous
       // chapter absorb those characters. The final chapter is always kept so a
       // short ending ("尾声") never loses its title.
-      const kept = [unique[0]]
-      for (let i = 1; i < unique.length; i += 1) {
-        const current = unique[i]
-        const next = unique[i + 1]
+      const kept = [deduped[0]]
+      for (let i = 1; i < deduped.length; i += 1) {
+        const current = deduped[i]
+        const next = deduped[i + 1]
         if (next && next.start - current.start < MIN_CHAPTER_CHARS) continue
         kept.push(current)
       }
       return kept
+    }
+
+    /**
+     * Body bounds for each chapter. The heading line is metadata — the reader
+     * paints it as the page title — so the body starts after it. Files often
+     * repeat that line (occasionally twice, or without the 第N章 prefix), and a
+     * stored table may point at the second copy; both cases are normalised here
+     * so a chapter never renders its own title twice nor the next one's at the
+     * bottom.
+     */
+    function layoutChapters(text, chapters) {
+      const body = typeof text === 'string' ? text : ''
+      const list = Array.isArray(chapters) ? chapters : []
+      const out = []
+
+      const clamp = (value) => Math.min(Math.max(0, Number(value) || 0), body.length)
+      const skipBlank = (at) => {
+        let cursor = at
+        while (cursor < body.length && (body[cursor] === ' ' || body[cursor] === '\t' || body[cursor] === '\u3000')) {
+          cursor += 1
+        }
+        if (body[cursor] === '\n') return cursor + 1
+        return at
+      }
+
+      for (const chapter of list) {
+        const title = String(chapter?.title ?? '')
+        let start = clamp(chapter?.start)
+
+        // A duplicate heading right before `start` means the stored offset is
+        // the second copy: pull the boundary back so the previous chapter stops
+        // in front of the title instead of swallowing it.
+        const copy = body.lastIndexOf(title, start - 1)
+        if (copy > 0 && body[copy - 1] === '\n') {
+          const gap = body.slice(copy + title.length, start)
+          if (gap.length > 0 && gap.length <= DUPLICATE_HEADING_WINDOW && /^[ \t\u3000\n]*$/.test(gap) && gap.includes('\n')) {
+            start = copy
+          }
+        }
+
+        let from = skipBlank(start)
+        const rest = titleRemainder(title)
+        for (let guard = 0; guard < 8; guard += 1) {
+          const nextBlank = skipBlank(from)
+          if (nextBlank !== from) {
+            from = nextBlank
+            continue
+          }
+          const newline = body.indexOf('\n', from)
+          const lineEnd = newline === -1 ? body.length : newline
+          const line = body.slice(from, lineEnd).trim()
+          if (line !== '' && (line === title || (rest !== '' && line === rest))) {
+            from = lineEnd < body.length ? lineEnd + 1 : lineEnd
+            continue
+          }
+          break
+        }
+
+        out.push({ title, start, bodyStart: Math.min(from, body.length) })
+      }
+      return out
+    }
+
+    /** `第1章 初见` → `初见`; empty when the title carries no such prefix. */
+    function titleRemainder(title) {
+      const match = /^第[0-9零一二三四五六七八九十百千万两〇]{1,8}[章节回卷篇部集][ \t\u3000]*(.+)$/.exec(title)
+      const rest = match ? match[1].trim() : ''
+      return rest.length >= 2 && rest !== title ? rest : ''
     }
 
     function splitByLength(body) {
@@ -394,8 +481,8 @@ window.__ModuleLoader__.load({
 .dnv-readerSub{font-size:11.5px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .dnv-readerBody{flex:1;min-height:0;overflow:auto;outline:none;padding:26px 20px 48px;scroll-behavior:auto;scrollbar-gutter:stable;overscroll-behavior:contain}
 .dnv-page{max-width:var(--dnv-measure,720px);margin:0 auto}
-.dnv-chapterTitle{font-size:1.28em;font-weight:600;margin:0 0 .9em;line-height:1.5}
-.dnv-text{white-space:pre-wrap;word-break:break-word;margin:0;font-family:var(--dnv-font,Georgia,"Songti SC","Source Han Serif SC",serif)}
+.dnv-chapterTitle{font-size:1.28em;font-weight:400;margin:0 0 .9em;line-height:1.5}
+.dnv-text{white-space:pre-wrap;word-break:break-word;margin:0;font-family:inherit;font-weight:400}
 .dnv-readerFoot{display:flex;align-items:center;gap:8px;padding:10px 16px;border-top:1px solid var(--dsw-alias-border-l1)}
 .dnv-footHint{font-size:11px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dnv-progressLine{flex:none;height:2px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}
@@ -765,13 +852,17 @@ window.__ModuleLoader__.load({
       }
 
       const total = chapters.length
-      const current = chapters[index] ?? { title: '', start: 0 }
+      // Heading lines are painted as the page title, so the body starts after
+      // them (and after any repeated copy of one). Stored tables from older
+      // versions only carry `start`; both shapes go through this.
+      const laid = React.useMemo(() => layoutChapters(text, chapters), [text, chapters])
+      const current = laid[index] ?? { title: '', start: 0, bodyStart: 0 }
       const chapterText = React.useMemo(() => {
         if (typeof text !== 'string') return ''
-        const start = Math.max(0, current.start ?? 0)
-        const end = index + 1 < total ? Math.max(start, chapters[index + 1].start) : text.length
-        return text.slice(start, end)
-      }, [text, chapters, index, total, current.start])
+        const start = Math.max(0, current.bodyStart ?? current.start ?? 0)
+        const end = index + 1 < total ? Math.max(start, laid[index + 1].start) : text.length
+        return text.slice(start, end).replace(/\s+$/, '')
+      }, [text, laid, index, total, current.bodyStart, current.start])
 
       // The restore above only picks the chapter; the scroll offset can be set
       // once that chapter's body is actually in the DOM (a remount scrolls to
@@ -1292,7 +1383,7 @@ window.__ModuleLoader__.load({
       name: 'dsh-novels',
       inject: ['slots', 'locale'],
       /** Node-side tests reach the pure text pipeline through this. */
-      testHooks: { decodeBytes, normalizeText, splitChapters, groupChapters, fittedReaderHeight, css: CSS },
+      testHooks: { decodeBytes, normalizeText, splitChapters, layoutChapters, groupChapters, fittedReaderHeight, css: CSS },
       apply(ctx) {
         // The panel must be styled even before its slot is first rendered:
         // install the sheet as soon as the plugin activates.
