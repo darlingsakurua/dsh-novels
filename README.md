@@ -1,5 +1,7 @@
 # dsh-novels
 
+**English** | [简体中文](README.zh-CN.md)
+
 Read `.txt` novels inside DeepSeek Harness: import a file, get chapters split
 automatically, and read it in a panel next to the conversation.
 
@@ -24,6 +26,17 @@ Features:
 - Long books (>300 chapters) get a grouped table of contents (100-chapter blocks,
   only the active block expanded).
 
+## Screenshots
+
+**Reader** — table of contents, font size / line height / page width controls,
+chapter counter, keyboard navigation.
+
+<img width="900" alt="Reader panel" src="docs/reader.jpg">
+
+**Grouped table of contents** — books over 300 chapters are split into blocks of
+100, with only the current block expanded.
+
+<img width="900" alt="Grouped table of contents" src="docs/toc.jpg">
 
 ## Panel styling
 
