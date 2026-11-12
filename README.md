@@ -23,6 +23,11 @@ Features:
   the OS file manager. The browser cannot do this itself, so the Host spawns
   `explorer.exe /select,…` (Windows), `open -R` (macOS) or `xdg-open` (Linux). The
   client only posts the book id — never a path.
+- Uploaded bodies keep the book's name: `books/<title>.txt` (+ `.chapters.json`).
+  Renaming a book renames both files, a second book with the same title becomes
+  `<title> (2).txt`, and characters Windows forbids (`\ / : * ? " < > |`) are
+  replaced before the name touches the disk. Older `<id>.txt` layouts migrate on
+  the next start.
 - Reader: table of contents, previous/next chapter, font size, line height, page
   width, keyboard (← → PageUp PageDown Space j k Esc Ctrl±), chapter counter and
   a bottom progress line.
