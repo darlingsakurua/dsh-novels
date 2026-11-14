@@ -43,6 +43,62 @@ window.__ModuleLoader__.load({
     const MIN_READER_HEIGHT = 240
     /** Two identical headings this close together are one chapter printed twice. */
     const DUPLICATE_HEADING_WINDOW = 300
+    /**
+     * The strip is a real scroll window: the whole chapter sits in the DOM and
+     * keys move the scroll position by whole lines. Slicing the text at
+     * character offsets used to cut sentences in half and skip ~200 characters
+     * per step, so the reader lost their place.
+     */
+    const INLINE_SCROLL_LINES = 3
+    /** Assumed line box, used when the host cannot measure the real line height. */
+    const INLINE_LINE_FALLBACK = 22
+    /**
+     * Ceiling on how much chapter text enters the strip's DOM. A normal chapter
+     * is a few thousand characters; this only guards against pathological files.
+     */
+    const INLINE_DOM_CHARS = 40000
+    /**
+     * The strip's size limits live on the element itself, not only in the
+     * injected stylesheet. A stale or blocked sheet must never let one
+     * chapter's text stretch the composer area over the conversation.
+     *
+     * Width, margins and fonts are not fixed here: they are copied from a real
+     * transcript paragraph at mount (see `typographyFrom`), so the prose looks
+     * exactly like the conversation around it.
+     */
+    const INLINE_BOX_STYLE = {
+      position: 'relative',
+      width: '100%',
+      maxHeight: '8.4em',
+      overflowY: 'auto',
+      overflowX: 'hidden',
+      scrollbarWidth: 'none',
+      overscrollBehavior: 'contain',
+    }
+    const INLINE_TEXT_STYLE = {
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+    }
+    /** Paragraph rhythm copied from the chat renderer: 16px between blocks. */
+    const INLINE_PARAGRAPH_STYLE = { margin: '16px 0' }
+    const INLINE_FIRST_PARAGRAPH_STYLE = { margin: '0 0 16px' }
+    const INLINE_PICK_STYLE = {
+      maxWidth: '720px',
+      maxHeight: '190px',
+      margin: '0 auto',
+      padding: '4px 16px 6px',
+      overflowY: 'auto',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '1px',
+    }
+    /** Dock entry id of the inline strip (the composer row above the input). */
+    const INLINE_SLOT_ID = 'reader'
+    /**
+     * Main-panel key of the full shelf view. The sidebar button keeps `SLOT_ID`
+     * so the shipped icon stays where it is; that panel only toggles the strip.
+     */
+    const FULL_PANEL_KEY = 'novels-full'
 
     /**
      * Height to pin on the reader root: from its own top edge to the bottom of
@@ -103,6 +159,8 @@ window.__ModuleLoader__.load({
       storageAt: '存储位置',
       storageHint: '已上传的 txt 与章节索引都存在这里',
       revealFailed: '无法打开文件管理器',
+      inlineOpen: '展开完整阅读',
+      inlineEmpty: '书架还是空的',
     }
 
     const en = {
@@ -154,6 +212,8 @@ window.__ModuleLoader__.load({
       storageAt: 'Stored in',
       storageHint: 'Uploaded txt files and chapter maps live here',
       revealFailed: 'Could not open the file manager',
+      inlineOpen: 'Open the full reader',
+      inlineEmpty: 'The shelf is empty',
     }
 
     /* ------------------------------------------------------- text pipeline -- */
@@ -388,6 +448,53 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * Copies the transcript's own typography onto the inline strip: the same
+     * font, size, line height, colour, letter spacing, and the same text
+     * column (width and left edge) as a real assistant paragraph. Picking the
+     * numbers up from the live DOM beats hard-coding them — the shell's tokens
+     * change between builds and between themes.
+     *
+     * Returns null whenever nothing usable is on screen, in which case the
+     * strip keeps its neutral defaults.
+     */
+    function typographyFrom(doc, outer) {
+      try {
+        if (!doc || typeof doc.querySelectorAll !== 'function' || typeof getComputedStyle !== 'function') return null
+        const markdown = Array.from(doc.querySelectorAll('[class*="_markdown_"]'))
+          .filter((node) => {
+            try {
+              const box = node.getBoundingClientRect()
+              return Boolean(box) && box.width > 0
+            } catch {
+              return false
+            }
+          })
+          .pop()
+        if (!markdown || typeof markdown.getBoundingClientRect !== 'function') return null
+        const computed = getComputedStyle(markdown)
+        const text = markdown.getBoundingClientRect()
+        if (!text || !(text.width > 0)) return null
+        let left = 0
+        if (outer && typeof outer.getBoundingClientRect === 'function') {
+          const box = outer.getBoundingClientRect()
+          left = Math.max(0, Math.round(text.left - box.left))
+        }
+        return {
+          fontSize: computed.fontSize,
+          lineHeight: computed.lineHeight,
+          fontFamily: computed.fontFamily,
+          fontWeight: computed.fontWeight,
+          color: computed.color,
+          letterSpacing: computed.letterSpacing === 'normal' ? undefined : computed.letterSpacing,
+          width: Math.round(text.width),
+          marginLeft: left,
+        }
+      } catch {
+        return null
+      }
+    }
+
     /* ----------------------------------------------------------------- API -- */
 
     function apiPath(suffix) {
@@ -429,6 +536,464 @@ window.__ModuleLoader__.load({
     function errorText(result) {
       if (result && result.body && typeof result.body.message === 'string') return result.body.message
       return result ? `HTTP ${result.status}` : 'network error'
+    }
+
+    /* -------------------------------------------------------- inline strip -- */
+
+    /**
+     * State of the composer strip. It lives outside React because the toggle is
+     * the sidebar icon (another slot and another renderer) while the strip is a
+     * dock entry.
+     *
+     * `hidden` → nothing; `picker` → a short book list; `reading` → five lines
+     * of prose for `selectedId`.
+     */
+    const inlineStrip = (() => {
+      let mode = 'hidden'
+      let selectedId = null
+      const listeners = new Set()
+      const announce = () => {
+        for (const listener of [...listeners]) listener(mode)
+      }
+      const api = {
+        mode: () => mode,
+        selectedId: () => selectedId,
+        setMode(next) {
+          const value = next === 'reading' ? 'reading' : next === 'picker' ? 'picker' : 'hidden'
+          if (value === mode) return
+          mode = value
+          announce()
+        },
+        isVisible: () => mode !== 'hidden',
+        read(bookId) {
+          selectedId = typeof bookId === 'string' && bookId ? bookId : null
+          mode = 'reading'
+          announce()
+        },
+        showPicker() {
+          api.setMode('picker')
+        },
+        hide() {
+          api.setMode('hidden')
+        },
+        /** The icon: closed → pick a book; open → close. */
+        toggle() {
+          api.setMode(mode === 'hidden' ? 'picker' : 'hidden')
+        },
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      }
+      return api
+    })()
+
+    /** Assigned in `apply`; the toggle panel hands the centre back to the chat. */
+    let navigateToPanel = () => {}
+
+    /** Text fetched for the strip is kept for the page's lifetime. */
+    const bookCache = new Map()
+
+    /** The book the reader most likely wants: started ones first, then newest. */
+    function pickCurrentBook(books) {
+      if (!Array.isArray(books) || books.length === 0) return null
+      const rank = (book) => {
+        const progress = book?.progress ?? {}
+        const started = Number(progress.percent) > 0 || Number(progress.chapterIndex) > 0 ? 1 : 0
+        return [started, Number(book?.updatedAt ?? 0)]
+      }
+      return [...books].sort((a, b) => {
+        const [startedA, updatedA] = rank(a)
+        const [startedB, updatedB] = rank(b)
+        return startedB - startedA || updatedB - updatedA
+      })[0]
+    }
+
+    function clampIndex(index, length) {
+      if (!Number.isFinite(index) || length <= 0) return 0
+      return Math.min(Math.max(0, Math.trunc(index)), length - 1)
+    }
+
+    /**
+     * Five anonymous lines of the current book, above the composer. It has no
+     * chrome: no title, no buttons, no chapter label — only the prose, so it
+     * reads like part of the transcript.
+     */
+    function InlineStrip(props) {
+      const t = props.t ?? ((key) => key)
+      const [loaded, setLoaded] = React.useState({ book: null, chapters: [], text: null, error: null })
+      const [index, setIndex] = React.useState(0)
+      const [offset, setOffset] = React.useState(0)
+      const saveTimer = React.useRef(null)
+      const latest = React.useRef({ book: null, chapters: [], text: null, index: 0, offset: 0 })
+      /* Watch the strip's real height: if the host ever stretches the dock
+         entry, this line lands in the renderer console and therefore in the
+         host log, which is the only ground truth available without a browser. */
+      const tall = React.useRef(null)
+      /* Offset (in characters) to restore when the next chapter body renders. */
+      const restoreRef = React.useRef(0)
+      /* Typography borrowed from a live transcript paragraph. */
+      const [typo, setTypo] = React.useState(null)
+      React.useEffect(() => {
+        const node = tall.current
+        if (!node) return
+        try {
+          const height = Number(node.offsetHeight ?? 0)
+          if (height > 200) {
+            console.error(
+              '[dsh-novels] inline strip is too tall:',
+              height,
+              'parent=',
+              node.parentElement ? node.parentElement.className || node.parentElement.tagName : 'none',
+            )
+          }
+        } catch {
+          /* measuring is optional */
+        }
+      })
+
+      React.useEffect(() => {
+        let cancelled = false
+        const load = async () => {
+          const wanted = props.bookId ?? inlineStrip.selectedId()
+          if (!wanted) {
+            setLoaded({ book: null, chapters: [], text: null, error: null })
+            return
+          }
+          let entry = bookCache.get(wanted)
+          if (!entry) {
+            const meta = await fetchJson(`books/${wanted}`)
+            if (cancelled) return
+            if (!meta.ok || !meta.body?.ok) {
+              setLoaded({ book: null, chapters: [], text: null, error: errorText(meta) })
+              return
+            }
+            const text = await fetchText(`books/${wanted}/text`)
+            if (cancelled) return
+            entry = { book: meta.body.book ?? null, chapters: meta.body.chapters ?? [], text }
+            bookCache.set(wanted, entry)
+          }
+          const progress = entry.book?.progress ?? {}
+          setLoaded({ book: entry.book, chapters: entry.chapters, text: entry.text, error: null })
+          setIndex(clampIndex(Number(progress.chapterIndex) || 0, entry.chapters.length))
+          const resumeAt = Math.max(0, Math.trunc(Number(progress.offsetChars) || 0))
+          restoreRef.current = resumeAt
+          setOffset(resumeAt)
+        }
+        load().catch((error) => {
+          if (!cancelled) setLoaded({ book: null, chapters: [], text: null, error: String(error) })
+        })
+        return () => {
+          cancelled = true
+        }
+      }, [props.bookId])
+
+      const laid = React.useMemo(
+        () => layoutChapters(loaded.text ?? '', loaded.chapters),
+        [loaded.text, loaded.chapters],
+      )
+      const current = laid[index] ?? null
+      const bodyText = React.useMemo(() => {
+        if (!current) return ''
+        const next = laid[index + 1]
+        const end = next ? next.start : (loaded.text ?? '').length
+        return (loaded.text ?? '').slice(current.bodyStart, end).replace(/^\s+/, '')
+      }, [laid, index, loaded.text])
+
+      latest.current = { book: loaded.book, chapters: loaded.chapters, text: loaded.text, index, offset }
+
+      const persist = React.useCallback((nextIndex, nextOffset, immediate) => {
+        const now = latest.current
+        if (!now.book || !now.text) return
+        const write = () => {
+          const chapterStart = now.chapters[nextIndex]?.start ?? 0
+          const percent = Math.max(0, Math.min(1, (chapterStart + nextOffset) / Math.max(1, now.text.length)))
+          /* Keep the cached copy in step, so hiding and reopening the strip
+             resumes where the reader stopped instead of at the old position. */
+          const cached = bookCache.get(now.book.id)
+          if (cached && cached.book) {
+            cached.book = {
+              ...cached.book,
+              progress: { chapterIndex: nextIndex, offsetChars: nextOffset, percent },
+            }
+          }
+          fetchJson(`books/${now.book.id}/progress`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chapterIndex: nextIndex, offsetChars: nextOffset, percent }),
+          }).catch(() => {})
+        }
+        if (saveTimer.current) clearTimeout(saveTimer.current)
+        if (immediate) write()
+        else saveTimer.current = setTimeout(write, 600)
+      }, [])
+
+      React.useEffect(
+        () => () => {
+          if (saveTimer.current) clearTimeout(saveTimer.current)
+        },
+        [],
+      )
+
+      const move = (delta) => {
+        const node = tall.current
+        if (!node || !bodyText) return
+        const max = Math.max(0, Number(node.scrollHeight ?? 0) - Number(node.clientHeight ?? 0))
+        const next = Math.max(0, Math.min(max, Number(node.scrollTop ?? 0) + delta))
+        node.scrollTop = next
+        syncOffset(node)
+      }
+
+      /** Turns the current scroll position back into a chapter-relative offset. */
+      const syncOffset = (node) => {
+        if (!node) return
+        const max = Math.max(0, Number(node.scrollHeight ?? 0) - Number(node.clientHeight ?? 0))
+        const fraction = max > 0 ? Math.max(0, Math.min(1, Number(node.scrollTop ?? 0) / max)) : 0
+        const next = Math.round(fraction * bodyText.length)
+        setOffset(next)
+        persist(index, next, false)
+      }
+
+      const lineStep = (node) => {
+        let line = INLINE_LINE_FALLBACK
+        try {
+          if (typeof getComputedStyle === 'function' && node) {
+            const measured = Number.parseFloat(getComputedStyle(node).lineHeight)
+            if (Number.isFinite(measured) && measured > 0) line = measured
+          }
+        } catch {
+          /* fall back to the constant */
+        }
+        return Math.round(line * INLINE_SCROLL_LINES)
+      }
+
+      const pageStep = (node) => {
+        const visible = Number(node?.clientHeight ?? 0)
+        return Math.max(1, Math.round(visible - INLINE_LINE_FALLBACK))
+      }
+
+      const jump = (delta) => {
+        if (laid.length === 0) return
+        const next = clampIndex(index + delta, laid.length)
+        if (next === index) return
+        setIndex(next)
+        setOffset(0)
+        restoreRef.current = 0
+        if (tall.current) tall.current.scrollTop = 0
+        persist(next, 0, true)
+      }
+
+      const onKeyDown = (event) => {
+        const name = event.key
+        const node = tall.current
+        if (name === 'ArrowDown' || name === 'j') {
+          event.preventDefault()
+          move(lineStep(node))
+        } else if (name === 'ArrowUp' || name === 'k') {
+          event.preventDefault()
+          move(-lineStep(node))
+        } else if (name === 'PageDown' || name === ' ') {
+          event.preventDefault()
+          move(pageStep(node))
+        } else if (name === 'PageUp') {
+          event.preventDefault()
+          move(-pageStep(node))
+        } else if (name === 'ArrowRight') {
+          event.preventDefault()
+          jump(1)
+        } else if (name === 'ArrowLeft') {
+          event.preventDefault()
+          jump(-1)
+        } else if (name === 'Escape') {
+          event.preventDefault()
+          inlineStrip.hide()
+        }
+      }
+
+      /* Restore the saved position once the chapter's text is actually in the
+         element, and after every chapter change. Deliberately keyed on the
+         chapter, not on the offset, so scrolling never fights this effect. */
+      React.useEffect(() => {
+        const node = tall.current
+        if (!node || !bodyText) return
+        const max = Math.max(0, Number(node.scrollHeight ?? 0) - Number(node.clientHeight ?? 0))
+        const wanted = restoreRef.current
+        const fraction = wanted > 0 ? Math.max(0, Math.min(1, wanted / Math.max(1, bodyText.length))) : 0
+        node.scrollTop = Math.round(max * fraction)
+      }, [index, bodyText])
+
+      const chapterText = bodyText.slice(0, INLINE_DOM_CHARS)
+
+      /* Borrow the transcript's typography (font, size, line height, colour and
+         the text column's left edge and width) as soon as something is on
+         screen, and again whenever the window is resized. Hooks stay above the
+         early return so the count never changes between renders. */
+      React.useEffect(() => {
+        const measure = () => {
+          const next = typographyFrom(typeof document === 'undefined' ? null : document, tall.current)
+          if (next) setTypo(next)
+        }
+        measure()
+        let remove = null
+        try {
+          if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('resize', measure)
+            remove = () => window.removeEventListener('resize', measure)
+          }
+        } catch {
+          remove = null
+        }
+        return remove ?? undefined
+      }, [chapterText])
+
+      if (!current) return null
+
+      if (!chapterText) {
+        return h(
+          'div',
+          { className: 'dnv-inline', style: INLINE_BOX_STYLE, ref: tall },
+          h('div', { className: 'dnv-inlineText', style: INLINE_TEXT_STYLE }, loaded.error ?? t('inlineEmpty')),
+        )
+      }
+      const textStyle = typo ? { ...INLINE_TEXT_STYLE, ...typo } : INLINE_TEXT_STYLE
+      const paragraphs = chapterText
+        .split(/\n+/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+      return h(
+        'div',
+        {
+          className: 'dnv-inline',
+          style: INLINE_BOX_STYLE,
+          ref: tall,
+          tabIndex: 0,
+          onKeyDown,
+          onScroll: (event) => syncOffset(event.currentTarget),
+          onDoubleClick: () => navigateToPanel(FULL_PANEL_KEY),
+        },
+        h(
+          'div',
+          { className: 'dnv-inlineText', style: textStyle, key: 'text' },
+          paragraphs.length > 0
+            ? paragraphs.map((line, position) =>
+                h(
+                  'p',
+                  { key: `p${position}`, style: position === 0 ? INLINE_FIRST_PARAGRAPH_STYLE : INLINE_PARAGRAPH_STYLE },
+                  line,
+                ),
+              )
+            : chapterText,
+        ),
+        h(
+          'button',
+          {
+            key: 'expand',
+            type: 'button',
+            className: 'dnv-inlineExpand',
+            title: t('inlineOpen'),
+            onClick: (event) => {
+              event.stopPropagation()
+              navigateToPanel(FULL_PANEL_KEY)
+            },
+          },
+          '⤢',
+        ),
+      )
+    }
+
+    /**
+     * The compact book list shown the first time the icon is clicked: short
+     * rows, its own scroll area, never taller than a few lines.
+     */
+    function InlinePicker(props) {
+      const t = props.t ?? ((key) => key)
+      const [state, setState] = React.useState({ loading: true, books: [], error: null })
+
+      React.useEffect(() => {
+        let cancelled = false
+        fetchJson('library')
+          .then((result) => {
+            if (cancelled) return
+            if (!result.ok || !result.body?.ok) {
+              setState({ loading: false, books: [], error: errorText(result) })
+              return
+            }
+            setState({ loading: false, books: result.body.books ?? [], error: null })
+          })
+          .catch((error) => {
+            if (!cancelled) setState({ loading: false, books: [], error: String(error) })
+          })
+        return () => {
+          cancelled = true
+        }
+      }, [])
+
+      const choose = (book) => {
+        inlineStrip.read(book.id)
+      }
+
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          inlineStrip.hide()
+        }
+      }
+
+      const current = inlineStrip.selectedId()
+      return h(
+        'div',
+        { className: 'dnv-pick', style: INLINE_PICK_STYLE, onKeyDown, tabIndex: 0 },
+        state.loading ? h('div', { className: 'dnv-pickHint' }, t('loading')) : null,
+        !state.loading && state.error ? h('div', { className: 'dnv-pickHint' }, state.error) : null,
+        !state.loading && !state.error && state.books.length === 0
+          ? h('div', { className: 'dnv-pickHint' }, t('inlineEmpty'))
+          : null,
+        state.books.map((book) =>
+          h(
+            'button',
+            {
+              key: book.id,
+              type: 'button',
+              className: `dnv-pickRow${book.id === current ? ' dnv-pickRow-on' : ''}`,
+              onClick: () => choose(book),
+            },
+            h('span', { className: 'dnv-pickTitle' }, book.title),
+            h(
+              'span',
+              { className: 'dnv-pickMeta' },
+              Number(book.progress?.chapterIndex) > 0 || Number(book.progress?.percent) > 0
+                ? fill(t('progressAt'), { chapter: Number(book.progress?.chapterIndex ?? 0) + 1 })
+                : t('unread'),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /** The dock entry: picker, or prose, or nothing. */
+    function InlineDock(props) {
+      const [mode, setMode] = React.useState(() => inlineStrip.mode())
+      React.useEffect(() => inlineStrip.subscribe(setMode), [])
+      if (mode === 'picker') return h(InlinePicker, { t: props.t })
+      if (mode === 'reading') return h(InlineStrip, { t: props.t })
+      return null
+    }
+
+    /**
+     * What the sidebar button mounts, but only as a safety net: the icon itself
+     * stops the click before the shell selects a panel. If the key is ever
+     * selected anyway (keyboard activation), flip the strip and hand the centre
+     * column straight back to the conversation.
+     */
+    function InlineToggle() {
+      const done = React.useRef(false)
+      React.useEffect(() => {
+        if (done.current) return
+        done.current = true
+        inlineStrip.toggle()
+        navigateToPanel(null)
+      }, [])
+      return null
     }
 
     /* ---------------------------------------------------------------- icons -- */
@@ -524,6 +1089,20 @@ window.__ModuleLoader__.load({
 .dnv-tocGroupHead:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .dnv-tocGroupHead[data-active="true"]{color:var(--dsw-alias-label-secondary)}
 .dnv-tocSection .dnv-tocItem{padding-left:18px}
+.dnv-iconHit{display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.dnv-inline{position:relative;max-height:8.4em;font:inherit;line-height:1.7;color:var(--dsw-alias-label-primary);cursor:text;outline:none;user-select:text;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;overscroll-behavior:contain}
+.dnv-inline::-webkit-scrollbar{width:0;height:0;display:none}
+.dnv-inlineText{white-space:pre-wrap;word-break:break-word;font-family:inherit;font-weight:400}
+.dnv-inlineExpand{position:absolute;top:0;right:4px;appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1;padding:3px 4px;border-radius:4px;cursor:pointer;opacity:0}
+.dnv-inline:hover .dnv-inlineExpand,.dnv-inlineExpand:focus-visible{opacity:.65}
+.dnv-inline:focus{outline:none}
+.dnv-pick{max-width:720px;max-height:190px;margin:0 auto;padding:4px 16px 6px;overflow-y:auto;display:flex;flex-direction:column;gap:1px;outline:none}
+.dnv-pickRow{appearance:none;display:flex;align-items:baseline;gap:10px;width:100%;text-align:left;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12.5px;line-height:1.6;padding:4px 8px;border-radius:5px;cursor:pointer}
+.dnv-pickRow:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dnv-pickRow-on{color:var(--dsw-alias-label-primary)}
+.dnv-pickTitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dnv-pickMeta{flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.dnv-pickHint{font-size:12px;color:var(--dsw-alias-label-tertiary);padding:4px 8px}
 @media (prefers-reduced-motion: reduce){
   .dnv-root *{transition:none !important;animation:none !important}
 }
@@ -544,7 +1123,16 @@ window.__ModuleLoader__.load({
       const head = document.head
       if (!head || typeof head.appendChild !== 'function') return false
       const selector = `style[data-plugin-css="${CSS_TAG}"]`
-      if (typeof document.querySelector === 'function' && document.querySelector(selector)) return true
+      if (typeof document.querySelector === 'function') {
+        const existing = document.querySelector(selector)
+        if (existing) {
+          /* A style tag left over from an older bundle would otherwise keep
+             the sheet's first version forever: every later rule would be
+             silently missing. Rewrite it whenever the text differs. */
+          if (existing.textContent !== CSS) existing.textContent = CSS
+          return true
+        }
+      }
       const tag = document.createElement('style')
       tag.setAttribute('data-plugin-css', CSS_TAG)
       tag.textContent = CSS
@@ -1460,11 +2048,30 @@ window.__ModuleLoader__.load({
       name: 'dsh-novels',
       inject: ['slots', 'locale'],
       /** Node-side tests reach the pure text pipeline through this. */
-      testHooks: { decodeBytes, normalizeText, splitChapters, layoutChapters, groupChapters, fittedReaderHeight, css: CSS },
+      testHooks: {
+        decodeBytes,
+        normalizeText,
+        splitChapters,
+        layoutChapters,
+        groupChapters,
+        fittedReaderHeight,
+        typographyFrom,
+        pickCurrentBook,
+        inlineStrip,
+        css: CSS,
+      },
       apply(ctx) {
         // The panel must be styled even before its slot is first rendered:
         // install the sheet as soon as the plugin activates.
         ensureStyles()
+
+        navigateToPanel = (id) => {
+          try {
+            ctx.get('layout')?.selectPanel?.(id)
+          } catch {
+            /* the layout service may be absent in tests */
+          }
+        }
 
         ctx.effect(
           () => ctx.locale.register(NS, { zh, en }),
@@ -1501,14 +2108,43 @@ window.__ModuleLoader__.load({
               label: () => tr('nav'),
               locale: NS,
             },
-            (owner) => h(NovelsIcon, { size: owner?.size ?? 16, active: owner?.active === true }),
+            (owner) =>
+              h(
+                'span',
+                {
+                  className: 'dnv-iconHit',
+                  // The shell's row selects a main panel on click. Stop it here:
+                  // the icon only toggles the strip, so the chat never moves.
+                  onClick: (event) => {
+                    event.stopPropagation()
+                    inlineStrip.toggle()
+                  },
+                },
+                h(NovelsIcon, { size: owner?.size ?? 16, active: owner?.active === true }),
+              ),
           ),
         )
 
+        // The sidebar button's panel: flip the strip and give the centre column
+        // back to the conversation, so clicking the icon never opens a page.
+        ctx.slots.inject('main', () =>
+          ctx.slots.register({ name: 'main', key: SLOT_ID, locale: NS }, () => h(InlineToggle)),
+        )
+
+        // The full shelf/reader, opened by double-clicking the strip.
         ctx.slots.inject('main', () =>
           ctx.slots.register(
-            { name: 'main', key: SLOT_ID, locale: NS },
+            { name: 'main', key: FULL_PANEL_KEY, locale: NS },
             (slotProps) => h(NovelsPanel, { t: makeT(slotProps?.t) }),
+          ),
+        )
+
+        // Five anonymous lines (or the book picker) between the transcript and
+        // the composer.
+        ctx.slots.inject('conversation.input.dock', () =>
+          ctx.slots.register(
+            { name: 'conversation.input.dock', id: INLINE_SLOT_ID, order: 30, locale: NS },
+            (slotProps) => h(InlineDock, { t: makeT(slotProps?.t) }),
           ),
         )
 
@@ -1531,7 +2167,8 @@ window.__ModuleLoader__.load({
           () => () => {
             try {
               const layout = ctx.get('layout')
-              if (layout?.panelInfo?.getSnapshot?.().activePanelId === SLOT_ID) layout.selectPanel(null)
+              const active = layout?.panelInfo?.getSnapshot?.().activePanelId
+              if (active === SLOT_ID || active === FULL_PANEL_KEY) layout.selectPanel(null)
             } catch {
               /* layout may be gone during teardown */
             }
