@@ -160,6 +160,8 @@ window.__ModuleLoader__.load({
       storageHint: '已上传的 txt 与章节索引都存在这里',
       revealFailed: '无法打开文件管理器',
       inlineOpen: '展开完整阅读',
+      inlineMode: '隐身模式',
+      inlineModeHint: '在对话区底部显示五行，不占满界面',
       inlineEmpty: '书架还是空的',
     }
 
@@ -213,6 +215,8 @@ window.__ModuleLoader__.load({
       storageHint: 'Uploaded txt files and chapter maps live here',
       revealFailed: 'Could not open the file manager',
       inlineOpen: 'Open the full reader',
+      inlineMode: 'Inline mode',
+      inlineModeHint: 'Show five lines at the bottom of the conversation',
       inlineEmpty: 'The shelf is empty',
     }
 
@@ -575,10 +579,6 @@ window.__ModuleLoader__.load({
         },
         hide() {
           api.setMode('hidden')
-        },
-        /** The icon: closed → pick a book; open → close. */
-        toggle() {
-          api.setMode(mode === 'hidden' ? 'picker' : 'hidden')
         },
         subscribe(listener) {
           listeners.add(listener)
@@ -975,23 +975,29 @@ window.__ModuleLoader__.load({
       const [mode, setMode] = React.useState(() => inlineStrip.mode())
       React.useEffect(() => inlineStrip.subscribe(setMode), [])
       if (mode === 'picker') return h(InlinePicker, { t: props.t })
-      if (mode === 'reading') return h(InlineStrip, { t: props.t })
+      if (mode === 'reading') {
+        return inlineStrip.selectedId() ? h(InlineStrip, { t: props.t }) : h(InlinePicker, { t: props.t })
+      }
       return null
     }
 
     /**
      * What the sidebar button mounts, but only as a safety net: the icon itself
      * stops the click before the shell selects a panel. If the key is ever
-     * selected anyway (keyboard activation), flip the strip and hand the centre
-     * column straight back to the conversation.
+     * selected anyway (keyboard activation), hide the strip when it is open,
+     * otherwise open the full shelf, and hand the centre column back.
      */
     function InlineToggle() {
       const done = React.useRef(false)
       React.useEffect(() => {
         if (done.current) return
         done.current = true
-        inlineStrip.toggle()
-        navigateToPanel(null)
+        if (inlineStrip.isVisible()) {
+          inlineStrip.hide()
+          navigateToPanel(null)
+          return
+        }
+        navigateToPanel(FULL_PANEL_KEY)
       }, [])
       return null
     }
@@ -1690,6 +1696,19 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dnv-size dnv-measureValue' }, `${measure}`),
             h('button', { type: 'button', className: 'dnv-btn dnv-btn-ghost dnv-measureBtn', 'data-step': '1', onClick: () => setMeasure((v) => Math.min(MAX_MEASURE, v + MEASURE_STEP)) }, '+'),
           ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dnv-btn dnv-inlineBtn',
+              title: t('inlineModeHint'),
+              onClick: () => {
+                if (book?.id) inlineStrip.read(book.id)
+                navigateToPanel(null)
+              },
+            },
+            t('inlineMode'),
+          ),
           h('button', { type: 'button', className: 'dnv-btn', onClick: () => setTocOpen((open) => !open) }, tocOpen ? t('closeToc') : t('toc')),
         ),
         tocOpen
@@ -2114,10 +2133,15 @@ window.__ModuleLoader__.load({
                 {
                   className: 'dnv-iconHit',
                   // The shell's row selects a main panel on click. Stop it here:
-                  // the icon only toggles the strip, so the chat never moves.
+                  // no strip → open the full shelf; strip open → just close it,
+                  // so the chat never moves on its own.
                   onClick: (event) => {
                     event.stopPropagation()
-                    inlineStrip.toggle()
+                    if (inlineStrip.isVisible()) {
+                      inlineStrip.hide()
+                      return
+                    }
+                    navigateToPanel(FULL_PANEL_KEY)
                   },
                 },
                 h(NovelsIcon, { size: owner?.size ?? 16, active: owner?.active === true }),

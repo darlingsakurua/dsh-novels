@@ -3,16 +3,28 @@
 **English** | [简体中文](README.zh-CN.md)
 
 Read `.txt` novels inside DeepSeek Harness: import a file, get chapters split
-automatically, and read it in a panel next to the conversation.
+automatically, and read it in a full panel next to the conversation — or as five
+quiet lines under the last message, in the conversation's own typography.
 
 <img width="900" alt="Novel shelf inside DeepSeek Harness" src="docs/shelf.jpg">
 
-Status: **0.1.3** — upload, shelf, reader, progress restore, rename, delete,
+Status: **0.1.6** — upload, shelf, reader, progress restore, rename, delete,
 reader prefs (font size, line height, page width), upload progress, long-book
-table-of-contents grouping, empty/error/loading states, and **show or open the
-folder that holds your uploaded files**.
+table-of-contents grouping, empty/error/loading states, **show or open the folder
+that holds your uploaded files**, and an **inline mode** that prints five lines of
+the current chapter at the bottom of the conversation instead of taking the whole
+centre column.
 
 Features:
+
+- Two ways to read the same book: the **full panel** (shelf + reader) or the
+  **inline strip** (five lines above the composer, dressed in the transcript's own
+  font, size, indent and line height).
+- The sidebar 书架 icon opens the full shelf whenever no novel is on screen, and
+  only closes the inline strip when one is — it never takes the centre column by
+  surprise. The reader's **Inline mode** button hands the open book to the strip
+  and returns the centre column to the chat; double-clicking the strip (or its ⤢
+  button) brings the full reader back.
 
 - Import `.txt` by button or drag & drop; 20 MB cap, UTF-8/BOM/GB18030/GBK/Big5/UTF-16.
 - Automatic chapter split with a 4000-character block fallback.
@@ -29,8 +41,13 @@ Features:
   replaced before the name touches the disk. Older `<id>.txt` layouts migrate on
   the next start.
 - Reader: table of contents, previous/next chapter, font size, line height, page
-  width, keyboard (← → PageUp PageDown Space j k Esc Ctrl±), chapter counter and
-  a bottom progress line.
+  width, **inline mode**, keyboard (← → PageUp PageDown Space j k Esc Ctrl±),
+  chapter counter and a bottom progress line.
+- Inline strip: five lines of prose, no title, no buttons, no chapter counter;
+  ← → change chapters, ↓/PageUp/PageDown/j/Space scroll three lines at a time,
+  Esc hides it. It scrolls (the whole chapter stays in the DOM) instead of cutting
+  the text, and it reads the newest assistant message's computed
+  font/line-height/width/indent so it looks like part of the conversation.
 - Reading position (chapter + scroll offset) and reader prefs persist on the Host,
   so they survive a reload and a restart. `/api` ports change every launch, so the
   client keeps no state of its own.
@@ -49,6 +66,27 @@ chapter counter, keyboard navigation.
 
 <img width="900" alt="Grouped table of contents" src="docs/toc.jpg">
 
+## Two ways to read
+
+| | Full panel | Inline strip |
+| --- | --- | --- |
+| Where | centre column, `main` slot | above the composer, `conversation.input.dock` |
+| Size | whole panel | five lines (`max-height: 8.4em`), scrollable |
+| Enter | 书架 icon, or ⤢ in the strip | **Inline mode** button in the reader toolbar |
+| Leave | ← 返回书架 | 书架 icon, Esc, or ⤢ back to the panel |
+
+The strip has no chrome: no title, no toolbar, no chapter number. Its typography is
+copied from the newest assistant message (font size, line height, family, colour,
+column width, left indent) via `typographyFrom()`, so the five lines sit on the
+same grid as the surrounding prose. Paragraph spacing matches the transcript's
+16 px.
+
+Both modes share the same Host state: chapter, scroll offset and reader prefs are
+written through `PATCH /books/{id}/progress` and `PATCH /prefs`, and the strip
+updates its cached book before hiding, so reopening it lands where you left off.
+When the strip is opened it picks the book you were last reading (started books
+first, then the most recently updated).
+
 ## Panel styling
 
 The stylesheet is installed **once into `document.head`** when the plugin
@@ -62,6 +100,12 @@ was a reader that could not scroll and a chapter footer pushed out of the panel.
 Keeping the sheet in `head` makes it independent of whichever view is mounted.
 `render.test.mjs` asserts both halves of that contract (sheet in `head`, no
 `<style>` inside the panel tree).
+
+The inline strip does not rely on the sheet for its size: `INLINE_BOX_STYLE`
+carries `max-height: 8.4em` and `overflow-y: auto` on the element itself, and the
+paragraph spacing is applied as inline styles, so a stale or missing stylesheet
+can never let a whole chapter flood the composer area. A runtime probe logs
+(`console.error`) if the strip ever measures taller than 200 px.
 
 ## Install
 
@@ -146,13 +190,15 @@ node _test/store.test.mjs        # Host store: index, atomic writes, clamping
 node _test/client-parse.test.mjs # decode/normalize/split (bundled client code)
 node _test/host-api.test.mjs     # routes, envelopes, 401/403 gate, limits
 node _test/perf.test.mjs         # 5 MB GB18030 sample end to end
-node _test/render.test.mjs       # shelf → upload → read → delete, headless React
+node _test/render.test.mjs       # shelf → upload → read → delete → inline strip, headless React
 ```
 
 `render.test.mjs` loads the real client bundle with a miniature React (hooks +
 static tree) and points `fetch` at a server wired to the plugin's own Host
 routes, so the browser flow is exercised without a browser. `_test/tmp/`
-holds its throwaway profiles.
+holds its throwaway profiles. Its last section covers the hybrid behaviour: the
+icon opens the full shelf, the reader's inline button moves the same book into the
+strip, the icon then only closes the strip.
 
 `_test/make-sample.mjs` regenerates the GB18030 samples in `samples/`
 (the 5 MB one is handy for checking upload time by hand).
@@ -166,9 +212,13 @@ These cannot be automated from here (the sandbox cannot start a browser):
    — the card should read "读到第 N 章" with a filled bar.
 3. Reopen it: same chapter, same scroll offset, same font size/line height/width.
 4. Rename a book on the shelf; the reader header follows the new title.
-5. Toggle the app theme (light/dark): all panel surfaces and text follow the
+5. Open a book, click **Inline mode**: the panel disappears, five lines appear
+   under the last message in the same font/indent, ← → change chapters, ↓ scrolls,
+   Esc hides. The 书架 icon then only closes the strip; with the strip closed it
+   opens the full shelf again.
+6. Toggle the app theme (light/dark): all panel surfaces and text follow the
    `--dsw-alias-*` tokens.
-6. Disable the plugin (`set_plugin target="include:dsh-novels" enabled=false`):
+7. Disable the plugin (`set_plugin target="include:dsh-novels" enabled=false`):
    the 书架 icon disappears and `/dsh-novels/api/v1/ping` returns 404; re-enable
    and refresh to get it back with the same books.
 
