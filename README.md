@@ -8,17 +8,19 @@ quiet lines under the last message, in the conversation's own typography.
 
 <img width="900" alt="Novel shelf inside DeepSeek Harness" src="docs/shelf.jpg">
 
-Status: **0.1.6** — upload, shelf, reader, progress restore, rename, delete,
-reader prefs (font size, line height, page width), upload progress, long-book
+Status: **0.1.7** — upload, shelf, reader, progress restore, rename, delete,
+reader prefs (font size, line height, page width, inline line count), upload
+progress, long-book
 table-of-contents grouping, empty/error/loading states, **show or open the folder
-that holds your uploaded files**, and an **inline mode** that prints five lines of
+that holds your uploaded files**, and an **inline mode** that prints one to five
+lines of
 the current chapter at the bottom of the conversation instead of taking the whole
 centre column.
 
 Features:
 
 - Two ways to read the same book: the **full panel** (shelf + reader) or the
-  **inline strip** (five lines above the composer, dressed in the transcript's own
+  **inline strip** (one to five lines above the composer, dressed in the transcript's own
   font, size, indent and line height).
 - The sidebar 书架 icon opens the full shelf whenever no novel is on screen, and
   only closes the inline strip when one is — it never takes the centre column by
@@ -43,11 +45,15 @@ Features:
 - Reader: table of contents, previous/next chapter, font size, line height, page
   width, **inline mode**, keyboard (← → PageUp PageDown Space j k Esc Ctrl±),
   chapter counter and a bottom progress line.
-- Inline strip: five lines of prose, no title, no buttons, no chapter counter;
-  ← → change chapters, ↓/PageUp/PageDown/j/Space scroll three lines at a time,
-  Esc hides it. It scrolls (the whole chapter stays in the DOM) instead of cutting
-  the text, and it reads the newest assistant message's computed
-  font/line-height/width/indent so it looks like part of the conversation.
+- Inline strip: one to five lines of prose (default five), no title, no buttons, no chapter counter;
+  ← → change chapters, ↓/PageUp/PageDown/j/Space move whole lines, Esc hides it.
+  One key press never moves further than the window shows (a one-line window
+  advances one line), and the position always lands on a line boundary: the strip
+  measures the rendered paragraphs and steps by line index, so a paragraph gap can
+  never swallow a line and a half line is never left at the edge. It scrolls (the
+  whole chapter stays in the DOM) instead of cutting the text, and it reads the
+  newest assistant message's computed font/line-height/width/indent so it looks
+  like part of the conversation.
 - Reading position (chapter + scroll offset) and reader prefs persist on the Host,
   so they survive a reload and a restart. `/api` ports change every launch, so the
   client keeps no state of its own.
@@ -71,15 +77,25 @@ chapter counter, keyboard navigation.
 | | Full panel | Inline strip |
 | --- | --- | --- |
 | Where | centre column, `main` slot | above the composer, `conversation.input.dock` |
-| Size | whole panel | five lines (`max-height: 8.4em`), scrollable |
+| Size | whole panel | one to five lines (default five), scrollable |
 | Enter | 书架 icon, or ⤢ in the strip | **Inline mode** button in the reader toolbar |
 | Leave | ← 返回书架 | 书架 icon, Esc, or ⤢ back to the panel |
 
 The strip has no chrome: no title, no toolbar, no chapter number. Its typography is
 copied from the newest assistant message (font size, line height, family, colour,
-column width, left indent) via `typographyFrom()`, so the five lines sit on the
+column width, left indent) via `typographyFrom()`, so the prose sits on the
 same grid as the surrounding prose. Paragraph spacing matches the transcript's
 16 px.
+
+Hovering the strip reveals five small buttons on its top-right corner: **1–5** set
+how many lines are shown. The choice is stored as `inlineLines` in the reader
+prefs (`PATCH /prefs`, clamped to 1–5 by the Host), so it survives a reload and is
+shared with the reader tab. The window height is the distance between real line
+tops, so it always ends where a line ends; `inlineStripHeight()` (line count ×
+measured line box) is only the fallback used before the paragraphs can be measured.
+
+Mouse-wheel scrolling is never realigned: it used to be pulled onto a line top
+after the wheel stopped, which read as the page jumping a line.
 
 Both modes share the same Host state: chapter, scroll offset and reader prefs are
 written through `PATCH /books/{id}/progress` and `PATCH /prefs`, and the strip
@@ -102,7 +118,8 @@ Keeping the sheet in `head` makes it independent of whichever view is mounted.
 `<style>` inside the panel tree).
 
 The inline strip does not rely on the sheet for its size: `INLINE_BOX_STYLE`
-carries `max-height: 8.4em` and `overflow-y: auto` on the element itself, and the
+carries the measured `max-height` (one to five line boxes) and `overflow-y: auto`
+on the element itself, and the
 paragraph spacing is applied as inline styles, so a stale or missing stylesheet
 can never let a whole chapter flood the composer area. A runtime probe logs
 (`console.error`) if the strip ever measures taller than 200 px.
@@ -212,10 +229,12 @@ These cannot be automated from here (the sandbox cannot start a browser):
    — the card should read "读到第 N 章" with a filled bar.
 3. Reopen it: same chapter, same scroll offset, same font size/line height/width.
 4. Rename a book on the shelf; the reader header follows the new title.
-5. Open a book, click **Inline mode**: the panel disappears, five lines appear
+5. Open a book, click **Inline mode**: the panel disappears and the chosen number
+   of lines (five by default) appears
    under the last message in the same font/indent, ← → change chapters, ↓ scrolls,
-   Esc hides. The 书架 icon then only closes the strip; with the strip closed it
-   opens the full shelf again.
+   Esc hides. Hover the strip and click **1–5** to change the height; reload the
+   window and it stays. The 书架 icon then only closes the strip; with the strip
+   closed it opens the full shelf again.
 6. Toggle the app theme (light/dark): all panel surfaces and text follow the
    `--dsw-alias-*` tokens.
 7. Disable the plugin (`set_plugin target="include:dsh-novels" enabled=false`):

@@ -57,6 +57,94 @@ window.__ModuleLoader__.load({
      * is a few thousand characters; this only guards against pathological files.
      */
     const INLINE_DOM_CHARS = 40000
+    /** The strip can be squeezed to one line or opened up to five. */
+    const INLINE_MIN_LINES = 1
+    const INLINE_MAX_LINES = 5
+    /** Line box assumed while the transcript's own line height is unknown: 1.7em. */
+    const INLINE_LINE_RATIO = 1.7
+    /**
+     * Height for `count` lines. Uses the transcript's measured line height when
+     * there is one, so the strip always shows exactly as many lines as asked
+     * for; falls back to `line-height: 1.7` boxes otherwise.
+     */
+    function inlineStripHeight(count, typo) {
+      const lines = Math.max(INLINE_MIN_LINES, Math.min(INLINE_MAX_LINES, Math.round(Number(count) || INLINE_MAX_LINES)))
+      const measured = Number.parseFloat(typo?.lineHeight)
+      if (Number.isFinite(measured) && measured > 0) return `${Math.round(measured * lines)}px`
+      return `${(lines * INLINE_LINE_RATIO).toFixed(1)}em`
+    }
+    /**
+     * Top offsets, relative to the scroller, where a line of prose starts. Read
+     * from the rendered paragraphs so the paragraph margins are skipped: a
+     * scroll position clamped here can never cut a line in half.
+     */
+    function lineTops(boxes, line) {
+      const tops = []
+      const step = Number(line)
+      if (!(step > 0)) return tops
+      for (const box of boxes ?? []) {
+        const top = Number(box?.offsetTop ?? 0)
+        const height = Number(box?.offsetHeight ?? 0)
+        if (!(height > 0)) continue
+        const count = Math.max(1, Math.round(height / step))
+        for (let index = 0; index < count; index += 1) tops.push(top + index * step)
+      }
+      return tops.sort((a, b) => a - b)
+    }
+    /** The last line top at or above `target`; 0 when nothing was measured. */
+    function snapTop(tops, target) {
+      const list = tops ?? []
+      const wanted = Number(target) || 0
+      if (list.length === 0) return Math.max(0, Math.round(wanted))
+      let best = list[0]
+      for (const top of list) {
+        if (top <= wanted + 1) best = top
+        else break
+      }
+      return best
+    }
+    /**
+     * Scroll position `count` whole lines away from `target`, by line index so a
+     * paragraph margin is crossed without skipping the paragraph's first line.
+     * `null` when no geometry was measured (the caller steps by pixels).
+     */
+    function stepTarget(tops, target, count) {
+      const list = tops ?? []
+      if (list.length === 0) return null
+      const start = snapTop(list, target)
+      const index = list.indexOf(start)
+      const next = Math.max(0, Math.min(list.length - 1, index + Math.trunc(Number(count) || 0)))
+      return list[next]
+    }
+    /** Whole lines that fit in a window of `height` px, at least one. */
+    function windowLines(height, line) {
+      const step = Number(line) > 0 ? Number(line) : 1
+      const box = Number(height)
+      if (!Number.isFinite(box)) return 1
+      return Math.max(1, Math.floor((box - 1) / step))
+    }
+    /**
+     * How many lines one key press may move: never more than the window shows,
+     * otherwise the lines in between are never read. Sign is preserved.
+     */
+    function stepLines(requested, visible) {
+      const count = Math.trunc(Number(requested) || 0)
+      const limit = Math.max(1, Math.trunc(Number(visible) || 1))
+      const size = Math.max(1, Math.min(Math.abs(count) || 1, limit))
+      return count < 0 ? -size : size
+    }
+    /**
+     * Height of a window that starts at `start` and shows `count` whole lines:
+     * the distance to the top of the next line, so paragraph margins inside the
+     * window are absorbed instead of leaving a half line at the bottom.
+     */
+    function windowHeight(tops, start, count, line, remaining) {
+      const list = tops ?? []
+      const index = list.indexOf(start)
+      const next = index >= 0 ? list[index + count] : undefined
+      if (Number.isFinite(next)) return Math.max(0, next - start)
+      return Math.max(0, Math.min(Number(line) * count, Number(remaining) || 0))
+    }
     /**
      * The strip's size limits live on the element itself, not only in the
      * injected stylesheet. A stale or blocked sheet must never let one
@@ -69,12 +157,13 @@ window.__ModuleLoader__.load({
     const INLINE_BOX_STYLE = {
       position: 'relative',
       width: '100%',
-      maxHeight: '8.4em',
       overflowY: 'auto',
       overflowX: 'hidden',
       scrollbarWidth: 'none',
       overscrollBehavior: 'contain',
     }
+    /** Wrapper that owns the hover controls, so they never scroll with the prose. */
+    const INLINE_WRAP_STYLE = { position: 'relative', width: '100%' }
     const INLINE_TEXT_STYLE = {
       whiteSpace: 'pre-wrap',
       wordBreak: 'break-word',
@@ -162,6 +251,8 @@ window.__ModuleLoader__.load({
       inlineOpen: '展开完整阅读',
       inlineMode: '隐身模式',
       inlineModeHint: '在对话区底部显示五行，不占满界面',
+      inlineLines: '显示行数',
+      inlineLinesHint: '显示 {n} 行',
       inlineEmpty: '书架还是空的',
     }
 
@@ -217,6 +308,8 @@ window.__ModuleLoader__.load({
       inlineOpen: 'Open the full reader',
       inlineMode: 'Inline mode',
       inlineModeHint: 'Show five lines at the bottom of the conversation',
+      inlineLines: 'Visible lines',
+      inlineLinesHint: 'Show {n} line(s)',
       inlineEmpty: 'The shelf is empty',
     }
 
@@ -634,6 +727,24 @@ window.__ModuleLoader__.load({
       const restoreRef = React.useRef(0)
       /* Typography borrowed from a live transcript paragraph. */
       const [typo, setTypo] = React.useState(null)
+      /* Height of the window, measured so it holds whole lines only. `null`
+         means "not measured yet" and the arithmetic fallback is used. */
+      const [winHeight, setWinHeight] = React.useState(null)
+      /* `inlineLines` is a profile preference: read it from the library instead
+         of duplicating it in the panel's state, so both views agree. */
+      const [prefs, setPrefs] = React.useState(null)
+      React.useEffect(() => {
+        let cancelled = false
+        fetchJson('library')
+          .then((result) => {
+            if (cancelled) return
+            if (result.ok && result.body?.ok) setPrefs(result.body.prefs ?? null)
+          })
+          .catch(() => {})
+        return () => {
+          cancelled = true
+        }
+      }, [])
       React.useEffect(() => {
         const node = tall.current
         if (!node) return
@@ -735,13 +846,51 @@ window.__ModuleLoader__.load({
         [],
       )
 
-      const move = (delta) => {
+      /** Real line box, in px: the transcript's, the strip's, then a constant. */
+      const measureLine = (node = tall.current) => {
+        const borrowed = Number.parseFloat(typo?.lineHeight)
+        if (Number.isFinite(borrowed) && borrowed > 0) return borrowed
+        try {
+          if (typeof getComputedStyle === 'function' && node) {
+            const measured = Number.parseFloat(getComputedStyle(node).lineHeight)
+            if (Number.isFinite(measured) && measured > 0) return measured
+          }
+        } catch {
+          /* fall back to the constant */
+        }
+        return INLINE_LINE_FALLBACK
+      }
+
+      /**
+       * Keeps the window on whole lines: with `snap` the scroll position moves
+       * to the nearest line top (the paragraph margins are not line tops, so it
+       * never stops in a gap), and the height becomes the distance to the next
+       * `lines`-th line top. Without it only the height is refreshed, which
+       * leaves wheel scrolling alone.
+       */
+      const alignWindow = (snap) => {
         const node = tall.current
-        if (!node || !bodyText) return
-        const max = Math.max(0, Number(node.scrollHeight ?? 0) - Number(node.clientHeight ?? 0))
-        const next = Math.max(0, Math.min(max, Number(node.scrollTop ?? 0) + delta))
-        node.scrollTop = next
-        syncOffset(node)
+        if (!node) return
+        const line = measureLine(node)
+        let tops = []
+        try {
+          if (typeof node.querySelectorAll === 'function') tops = lineTops(node.querySelectorAll('p'), line)
+        } catch {
+          tops = []
+        }
+        let start = Number(node.scrollTop ?? 0)
+        if (snap) {
+          const wanted = snapTop(tops, start)
+          if (Math.abs(wanted - start) > 0.5) node.scrollTop = wanted
+          start = wanted
+        }
+        if (tops.length === 0) {
+          setWinHeight((current) => (current === null ? current : null))
+          return
+        }
+        const remaining = Math.max(0, Number(node.scrollHeight ?? 0) - start)
+        const height = windowHeight(tops, start, lines, line, remaining)
+        setWinHeight((current) => (current === height ? current : height > 0 ? height : null))
       }
 
       /** Turns the current scroll position back into a chapter-relative offset. */
@@ -754,22 +903,32 @@ window.__ModuleLoader__.load({
         persist(index, next, false)
       }
 
-      const lineStep = (node) => {
-        let line = INLINE_LINE_FALLBACK
-        try {
-          if (typeof getComputedStyle === 'function' && node) {
-            const measured = Number.parseFloat(getComputedStyle(node).lineHeight)
-            if (Number.isFinite(measured) && measured > 0) line = measured
-          }
-        } catch {
-          /* fall back to the constant */
-        }
-        return Math.round(line * INLINE_SCROLL_LINES)
-      }
+      /** Lines that fit in the window; at least one, never more than it shows. */
+      const pageLines = (node) => windowLines(Number(node?.clientHeight ?? 0), measureLine(node))
 
-      const pageStep = (node) => {
-        const visible = Number(node?.clientHeight ?? 0)
-        return Math.max(1, Math.round(visible - INLINE_LINE_FALLBACK))
+      /**
+       * Steps whole lines by index, never by pixels: paragraph margins mean a
+       * fixed pixel step would jump over the first line of the next paragraph.
+       * The step is capped at the visible line count, so a one-line window
+       * advances one line instead of skipping two.
+       */
+      const moveLines = (requested) => {
+        const node = tall.current
+        if (!node || !bodyText) return
+        const count = stepLines(requested, pageLines(node))
+        const max = Math.max(0, Number(node.scrollHeight ?? 0) - Number(node.clientHeight ?? 0))
+        const line = measureLine(node)
+        let tops = []
+        try {
+          if (typeof node.querySelectorAll === 'function') tops = lineTops(node.querySelectorAll('p'), line)
+        } catch {
+          tops = []
+        }
+        const current = Number(node.scrollTop ?? 0)
+        const target = stepTarget(tops, current, count)
+        node.scrollTop = Math.max(0, Math.min(max, target === null ? current + count * line : target))
+        alignWindow(true)
+        syncOffset(node)
       }
 
       const jump = (delta) => {
@@ -788,16 +947,16 @@ window.__ModuleLoader__.load({
         const node = tall.current
         if (name === 'ArrowDown' || name === 'j') {
           event.preventDefault()
-          move(lineStep(node))
+          moveLines(INLINE_SCROLL_LINES)
         } else if (name === 'ArrowUp' || name === 'k') {
           event.preventDefault()
-          move(-lineStep(node))
+          moveLines(-INLINE_SCROLL_LINES)
         } else if (name === 'PageDown' || name === ' ') {
           event.preventDefault()
-          move(pageStep(node))
+          moveLines(Math.max(1, pageLines(node)))
         } else if (name === 'PageUp') {
           event.preventDefault()
-          move(-pageStep(node))
+          moveLines(-Math.max(1, pageLines(node)))
         } else if (name === 'ArrowRight') {
           event.preventDefault()
           jump(1)
@@ -820,6 +979,9 @@ window.__ModuleLoader__.load({
         const wanted = restoreRef.current
         const fraction = wanted > 0 ? Math.max(0, Math.min(1, wanted / Math.max(1, bodyText.length))) : 0
         node.scrollTop = Math.round(max * fraction)
+        /* A restored fraction lands anywhere, including inside a paragraph
+           margin; pull it back onto a real line so no half line shows. */
+        alignWindow(true)
       }, [index, bodyText])
 
       const chapterText = bodyText.slice(0, INLINE_DOM_CHARS)
@@ -846,13 +1008,72 @@ window.__ModuleLoader__.load({
         return remove ?? undefined
       }, [chapterText])
 
+      const lines = Math.max(
+        INLINE_MIN_LINES,
+        Math.min(INLINE_MAX_LINES, Math.round(Number(prefs?.inlineLines) || INLINE_MAX_LINES)),
+      )
+      /* Measured window height: exactly `lines` whole lines, margins included.
+         Until the paragraphs can be measured the arithmetic fallback applies. */
+      const boxStyle = {
+        ...INLINE_BOX_STYLE,
+        maxHeight: winHeight === null ? inlineStripHeight(lines, typo) : `${winHeight}px`,
+      }
+
+      /* Line count, borrowed typography or chapter changed: realign the window. */
+      React.useEffect(() => {
+        alignWindow(true)
+      }, [lines, typo, chapterText])
+
+      /* Changing the height applies locally at once; the PATCH only confirms
+         the preference for the next window and for the reader tab. */
+      const changeLines = (next) => {
+        const wanted = Math.max(INLINE_MIN_LINES, Math.min(INLINE_MAX_LINES, next))
+        setPrefs((current) => ({ ...(current ?? {}), inlineLines: wanted }))
+        fetchJson('prefs', {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ inlineLines: wanted }),
+        })
+          .then((result) => {
+            if (result.ok && result.body?.ok) setPrefs(result.body.prefs ?? null)
+          })
+          .catch(() => {})
+      }
+
+      const lineButtons = h(
+        'div',
+        { key: 'lines', className: 'dnv-inlineLines', role: 'group', 'aria-label': t('inlineLines') },
+        Array.from({ length: INLINE_MAX_LINES }, (_, step) => INLINE_MIN_LINES + step).map((value) =>
+          h(
+            'button',
+            {
+              key: `line${value}`,
+              type: 'button',
+              className: value === lines ? 'dnv-lineBtn dnv-lineBtn-on' : 'dnv-lineBtn',
+              title: fill(t('inlineLinesHint'), { n: value }),
+              'aria-pressed': value === lines ? 'true' : 'false',
+              onClick: (event) => {
+                event.stopPropagation()
+                changeLines(value)
+              },
+            },
+            String(value),
+          ),
+        ),
+      )
+
       if (!current) return null
 
       if (!chapterText) {
         return h(
           'div',
-          { className: 'dnv-inline', style: INLINE_BOX_STYLE, ref: tall },
-          h('div', { className: 'dnv-inlineText', style: INLINE_TEXT_STYLE }, loaded.error ?? t('inlineEmpty')),
+          { className: 'dnv-inlineWrap', style: INLINE_WRAP_STYLE },
+          h(
+            'div',
+            { className: 'dnv-inline', style: boxStyle, ref: tall },
+            h('div', { className: 'dnv-inlineText', style: INLINE_TEXT_STYLE }, loaded.error ?? t('inlineEmpty')),
+          ),
+          lineButtons,
         )
       }
       const textStyle = typo ? { ...INLINE_TEXT_STYLE, ...typo } : INLINE_TEXT_STYLE
@@ -862,28 +1083,35 @@ window.__ModuleLoader__.load({
         .filter(Boolean)
       return h(
         'div',
-        {
-          className: 'dnv-inline',
-          style: INLINE_BOX_STYLE,
-          ref: tall,
-          tabIndex: 0,
-          onKeyDown,
-          onScroll: (event) => syncOffset(event.currentTarget),
-          onDoubleClick: () => navigateToPanel(FULL_PANEL_KEY),
-        },
+        { className: 'dnv-inlineWrap', style: INLINE_WRAP_STYLE },
         h(
           'div',
-          { className: 'dnv-inlineText', style: textStyle, key: 'text' },
-          paragraphs.length > 0
-            ? paragraphs.map((line, position) =>
-                h(
-                  'p',
-                  { key: `p${position}`, style: position === 0 ? INLINE_FIRST_PARAGRAPH_STYLE : INLINE_PARAGRAPH_STYLE },
-                  line,
-                ),
-              )
-            : chapterText,
+          {
+            className: 'dnv-inline',
+            style: boxStyle,
+            ref: tall,
+            tabIndex: 0,
+            onKeyDown,
+            /* Wheel and touch scrolling are left completely alone: realigning
+               after they stop made the page visibly jump a line. */
+            onScroll: (event) => syncOffset(event.currentTarget),
+            onDoubleClick: () => navigateToPanel(FULL_PANEL_KEY),
+          },
+          h(
+            'div',
+            { className: 'dnv-inlineText', style: textStyle, key: 'text' },
+            paragraphs.length > 0
+              ? paragraphs.map((line, position) =>
+                  h(
+                    'p',
+                    { key: `p${position}`, style: position === 0 ? INLINE_FIRST_PARAGRAPH_STYLE : INLINE_PARAGRAPH_STYLE },
+                    line,
+                  ),
+                )
+              : chapterText,
+          ),
         ),
+        lineButtons,
         h(
           'button',
           {
@@ -1096,12 +1324,18 @@ window.__ModuleLoader__.load({
 .dnv-tocGroupHead[data-active="true"]{color:var(--dsw-alias-label-secondary)}
 .dnv-tocSection .dnv-tocItem{padding-left:18px}
 .dnv-iconHit{display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
-.dnv-inline{position:relative;max-height:8.4em;font:inherit;line-height:1.7;color:var(--dsw-alias-label-primary);cursor:text;outline:none;user-select:text;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;overscroll-behavior:contain}
+.dnv-inlineWrap{position:relative;width:100%}
+.dnv-inline{position:relative;font:inherit;line-height:1.7;color:var(--dsw-alias-label-primary);cursor:text;outline:none;user-select:text;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;overscroll-behavior:contain}
 .dnv-inline::-webkit-scrollbar{width:0;height:0;display:none}
 .dnv-inlineText{white-space:pre-wrap;word-break:break-word;font-family:inherit;font-weight:400}
 .dnv-inlineExpand{position:absolute;top:0;right:4px;appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1;padding:3px 4px;border-radius:4px;cursor:pointer;opacity:0}
-.dnv-inline:hover .dnv-inlineExpand,.dnv-inlineExpand:focus-visible{opacity:.65}
+.dnv-inlineWrap:hover .dnv-inlineExpand,.dnv-inlineExpand:focus-visible{opacity:.65}
 .dnv-inline:focus{outline:none}
+.dnv-inlineLines{position:absolute;top:0;right:22px;display:flex;gap:1px;padding:1px 2px;border:1px solid var(--dsw-alias-border-l1);border-radius:5px;background:var(--dsw-alias-bg-layer-2);opacity:0;pointer-events:none;transition:opacity .12s ease;z-index:2}
+.dnv-inlineWrap:hover .dnv-inlineLines,.dnv-inlineWrap:focus-within .dnv-inlineLines{opacity:1;pointer-events:auto}
+.dnv-lineBtn{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:10.5px;line-height:1;min-width:14px;height:15px;padding:0 2px;border-radius:3px;cursor:pointer}
+.dnv-lineBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dnv-lineBtn-on{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dnv-pick{max-width:720px;max-height:190px;margin:0 auto;padding:4px 16px 6px;overflow-y:auto;display:flex;flex-direction:column;gap:1px;outline:none}
 .dnv-pickRow{appearance:none;display:flex;align-items:baseline;gap:10px;width:100%;text-align:left;border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12.5px;line-height:1.6;padding:4px 8px;border-radius:5px;cursor:pointer}
 .dnv-pickRow:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
@@ -2077,6 +2311,13 @@ window.__ModuleLoader__.load({
         typographyFrom,
         pickCurrentBook,
         inlineStrip,
+        inlineStripHeight,
+        lineTops,
+        snapTop,
+        stepTarget,
+        windowLines,
+        stepLines,
+        windowHeight,
         css: CSS,
       },
       apply(ctx) {
