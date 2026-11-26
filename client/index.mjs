@@ -48,8 +48,13 @@ window.__ModuleLoader__.load({
      * keys move the scroll position by whole lines. Slicing the text at
      * character offsets used to cut sentences in half and skip ~200 characters
      * per step, so the reader lost their place.
+     *
+     * One press moves exactly one window (see `pageLines`): with a two-line
+     * window that is two lines, so the bottom line of the previous view is never
+     * shown again; moving by a fixed three lines left the window's last lines
+     * repeated every time. The old constant also advanced three lines in a
+     * one-line window, which is what read as "skipping" lines.
      */
-    const INLINE_SCROLL_LINES = 3
     /** Assumed line box, used when the host cannot measure the real line height. */
     const INLINE_LINE_FALLBACK = 22
     /**
@@ -63,33 +68,48 @@ window.__ModuleLoader__.load({
     /** Line box assumed while the transcript's own line height is unknown: 1.7em. */
     const INLINE_LINE_RATIO = 1.7
     /**
-     * Height for `count` lines. Uses the transcript's measured line height when
-     * there is one, so the strip always shows exactly as many lines as asked
-     * for; falls back to `line-height: 1.7` boxes otherwise.
+     * One line box, as a CSS length: the transcript's measured line height when
+     * there is one, otherwise `line-height: 1.7` em (which the strip inherits).
+     */
+    function inlineLineBox(typo) {
+      const measured = Number.parseFloat(typo?.lineHeight)
+      if (Number.isFinite(measured) && measured > 0) return `${Math.round(measured)}px`
+      return `${INLINE_LINE_RATIO}em`
+    }
+    /**
+     * Height for `count` lines: a fixed box, never re-measured from the content.
+     * Keeping it constant is what stops the strip (and the composer dock) from
+     * resizing while the prose scrolls or the chapter changes.
      */
     function inlineStripHeight(count, typo) {
       const lines = Math.max(INLINE_MIN_LINES, Math.min(INLINE_MAX_LINES, Math.round(Number(count) || INLINE_MAX_LINES)))
-      const measured = Number.parseFloat(typo?.lineHeight)
-      if (Number.isFinite(measured) && measured > 0) return `${Math.round(measured * lines)}px`
+      const box = inlineLineBox(typo)
+      const px = Number.parseFloat(box)
+      if (box.endsWith('px')) return `${Math.round(px * lines)}px`
       return `${(lines * INLINE_LINE_RATIO).toFixed(1)}em`
     }
     /**
-     * Top offsets, relative to the scroller, where a line of prose starts. Read
-     * from the rendered paragraphs so the paragraph margins are skipped: a
-     * scroll position clamped here can never cut a line in half.
+     * Top offsets, relative to the scroller, where a line of prose starts.
+     *
+     * Paragraphs have no vertical margin, so the lines follow each other without
+     * gaps: every paragraph occupies whole line boxes and the next one begins
+     * where the previous ended. Heights are therefore summed rather than read
+     * from `offsetTop`, which keeps a scroll position on a line boundary and
+     * stops a short paragraph from leaving a blank line inside the window.
      */
     function lineTops(boxes, line) {
       const tops = []
       const step = Number(line)
       if (!(step > 0)) return tops
+      let base = 0
       for (const box of boxes ?? []) {
-        const top = Number(box?.offsetTop ?? 0)
         const height = Number(box?.offsetHeight ?? 0)
         if (!(height > 0)) continue
         const count = Math.max(1, Math.round(height / step))
-        for (let index = 0; index < count; index += 1) tops.push(top + index * step)
+        for (let index = 0; index < count; index += 1) tops.push(Math.round(base + index * step))
+        base += count * step
       }
-      return tops.sort((a, b) => a - b)
+      return tops
     }
     /** The last line top at or above `target`; 0 when nothing was measured. */
     function snapTop(tops, target) {
@@ -116,12 +136,21 @@ window.__ModuleLoader__.load({
       const next = Math.max(0, Math.min(list.length - 1, index + Math.trunc(Number(count) || 0)))
       return list[next]
     }
-    /** Whole lines that fit in a window of `height` px, at least one. */
+    /**
+     * Whole lines that fit in a window of `height` px, at least one.
+     *
+     * The window is exactly `lines × line box` tall, but sub-pixel layout can
+     * report a hair less (51.98 instead of 52). A plain floor — let alone
+     * `floor((height - 1) / line)` — then reported one line for a two-line
+     * window, so every key press advanced a single line and the window's bottom
+     * line was shown twice. The 5 % slack absorbs that rounding without ever
+     * inventing a line that the box cannot hold.
+     */
     function windowLines(height, line) {
       const step = Number(line) > 0 ? Number(line) : 1
       const box = Number(height)
       if (!Number.isFinite(box)) return 1
-      return Math.max(1, Math.floor((box - 1) / step))
+      return Math.max(1, Math.floor((box + step * 0.05) / step))
     }
     /**
      * How many lines one key press may move: never more than the window shows,
@@ -134,21 +163,9 @@ window.__ModuleLoader__.load({
       return count < 0 ? -size : size
     }
     /**
-     * Height of a window that starts at `start` and shows `count` whole lines:
-     * the distance to the top of the next line, so paragraph margins inside the
-     * window are absorbed instead of leaving a half line at the bottom.
-     */
-    function windowHeight(tops, start, count, line, remaining) {
-      const list = tops ?? []
-      const index = list.indexOf(start)
-      const next = index >= 0 ? list[index + count] : undefined
-      if (Number.isFinite(next)) return Math.max(0, next - start)
-      return Math.max(0, Math.min(Number(line) * count, Number(remaining) || 0))
-    }
-    /**
-     * The strip's size limits live on the element itself, not only in the
-     * injected stylesheet. A stale or blocked sheet must never let one
-     * chapter's text stretch the composer area over the conversation.
+     * The strip's size lives on the element itself, not only in the injected
+     * stylesheet. A stale or blocked sheet must never let one chapter's text
+     * stretch the composer area over the conversation.
      *
      * Width, margins and fonts are not fixed here: they are copied from a real
      * transcript paragraph at mount (see `typographyFrom`), so the prose looks
@@ -168,9 +185,19 @@ window.__ModuleLoader__.load({
       whiteSpace: 'pre-wrap',
       wordBreak: 'break-word',
     }
-    /** Paragraph rhythm copied from the chat renderer: 16px between blocks. */
-    const INLINE_PARAGRAPH_STYLE = { margin: '16px 0' }
-    const INLINE_FIRST_PARAGRAPH_STYLE = { margin: '0 0 16px' }
+    /**
+     * Paragraph rhythm: no vertical margin at all, just a two-character indent
+     * on the first line.
+     *
+     * A gap between paragraphs used to push the next paragraph down by a fixed
+     * number of pixels that was not a multiple of the line height: the window
+     * could show one line plus a blank gap, and the last line of a paragraph was
+     * easy to read twice. With zero margins every line of every paragraph sits
+     * on the same grid, so a window of N lines shows exactly N lines of prose.
+     */
+    function inlineParagraphStyle() {
+      return { margin: 0, textIndent: '2em' }
+    }
     const INLINE_PICK_STYLE = {
       maxWidth: '720px',
       maxHeight: '190px',
@@ -727,9 +754,6 @@ window.__ModuleLoader__.load({
       const restoreRef = React.useRef(0)
       /* Typography borrowed from a live transcript paragraph. */
       const [typo, setTypo] = React.useState(null)
-      /* Height of the window, measured so it holds whole lines only. `null`
-         means "not measured yet" and the arithmetic fallback is used. */
-      const [winHeight, setWinHeight] = React.useState(null)
       /* `inlineLines` is a profile preference: read it from the library instead
          of duplicating it in the panel's state, so both views agree. */
       const [prefs, setPrefs] = React.useState(null)
@@ -846,10 +870,16 @@ window.__ModuleLoader__.load({
         [],
       )
 
-      /** Real line box, in px: the transcript's, the strip's, then a constant. */
+      /**
+       * Real line box, in px: the transcript's, the strip's, then a constant.
+       *
+       * The borrowed value is rounded exactly like `inlineLineBox()` rounds it, so
+       * `windowLines(clientHeight, measureLine())` divides the fixed window height
+       * by the very same number the height was built from.
+       */
       const measureLine = (node = tall.current) => {
         const borrowed = Number.parseFloat(typo?.lineHeight)
-        if (Number.isFinite(borrowed) && borrowed > 0) return borrowed
+        if (Number.isFinite(borrowed) && borrowed > 0) return Math.round(borrowed)
         try {
           if (typeof getComputedStyle === 'function' && node) {
             const measured = Number.parseFloat(getComputedStyle(node).lineHeight)
@@ -862,35 +892,24 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Keeps the window on whole lines: with `snap` the scroll position moves
-       * to the nearest line top (the paragraph margins are not line tops, so it
-       * never stops in a gap), and the height becomes the distance to the next
-       * `lines`-th line top. Without it only the height is refreshed, which
-       * leaves wheel scrolling alone.
+       * Pulls the scroll position back onto a real line top. The window height
+       * itself is fixed by the line count, so this never resizes the strip; it
+       * only makes sure a programmatic jump does not start half way through a
+       * line. Wheel scrolling is not touched afterwards.
        */
-      const alignWindow = (snap) => {
+      const snapWindow = () => {
         const node = tall.current
         if (!node) return
-        const line = measureLine(node)
         let tops = []
         try {
-          if (typeof node.querySelectorAll === 'function') tops = lineTops(node.querySelectorAll('p'), line)
+          if (typeof node.querySelectorAll === 'function') tops = lineTops(node.querySelectorAll('p'), measureLine(node))
         } catch {
           tops = []
         }
-        let start = Number(node.scrollTop ?? 0)
-        if (snap) {
-          const wanted = snapTop(tops, start)
-          if (Math.abs(wanted - start) > 0.5) node.scrollTop = wanted
-          start = wanted
-        }
-        if (tops.length === 0) {
-          setWinHeight((current) => (current === null ? current : null))
-          return
-        }
-        const remaining = Math.max(0, Number(node.scrollHeight ?? 0) - start)
-        const height = windowHeight(tops, start, lines, line, remaining)
-        setWinHeight((current) => (current === height ? current : height > 0 ? height : null))
+        if (tops.length === 0) return
+        const start = Number(node.scrollTop ?? 0)
+        const wanted = snapTop(tops, start)
+        if (Math.abs(wanted - start) > 0.5) node.scrollTop = wanted
       }
 
       /** Turns the current scroll position back into a chapter-relative offset. */
@@ -927,7 +946,6 @@ window.__ModuleLoader__.load({
         const current = Number(node.scrollTop ?? 0)
         const target = stepTarget(tops, current, count)
         node.scrollTop = Math.max(0, Math.min(max, target === null ? current + count * line : target))
-        alignWindow(true)
         syncOffset(node)
       }
 
@@ -945,16 +963,10 @@ window.__ModuleLoader__.load({
       const onKeyDown = (event) => {
         const name = event.key
         const node = tall.current
-        if (name === 'ArrowDown' || name === 'j') {
-          event.preventDefault()
-          moveLines(INLINE_SCROLL_LINES)
-        } else if (name === 'ArrowUp' || name === 'k') {
-          event.preventDefault()
-          moveLines(-INLINE_SCROLL_LINES)
-        } else if (name === 'PageDown' || name === ' ') {
+        if (name === 'ArrowDown' || name === 'j' || name === 'PageDown' || name === ' ') {
           event.preventDefault()
           moveLines(Math.max(1, pageLines(node)))
-        } else if (name === 'PageUp') {
+        } else if (name === 'ArrowUp' || name === 'k' || name === 'PageUp') {
           event.preventDefault()
           moveLines(-Math.max(1, pageLines(node)))
         } else if (name === 'ArrowRight') {
@@ -981,7 +993,7 @@ window.__ModuleLoader__.load({
         node.scrollTop = Math.round(max * fraction)
         /* A restored fraction lands anywhere, including inside a paragraph
            margin; pull it back onto a real line so no half line shows. */
-        alignWindow(true)
+        snapWindow()
       }, [index, bodyText])
 
       const chapterText = bodyText.slice(0, INLINE_DOM_CHARS)
@@ -1012,16 +1024,20 @@ window.__ModuleLoader__.load({
         INLINE_MIN_LINES,
         Math.min(INLINE_MAX_LINES, Math.round(Number(prefs?.inlineLines) || INLINE_MAX_LINES)),
       )
-      /* Measured window height: exactly `lines` whole lines, margins included.
-         Until the paragraphs can be measured the arithmetic fallback applies. */
+      /* Fixed window: always exactly `lines` line boxes, never re-measured from
+         the text. A constant height is what keeps the strip (and the composer
+         dock above it) from resizing while the prose scrolls or chapters
+         change, so the page never jitters. */
+      const boxHeight = inlineStripHeight(lines, typo)
       const boxStyle = {
         ...INLINE_BOX_STYLE,
-        maxHeight: winHeight === null ? inlineStripHeight(lines, typo) : `${winHeight}px`,
+        height: boxHeight,
+        maxHeight: boxHeight,
       }
 
-      /* Line count, borrowed typography or chapter changed: realign the window. */
+      /* Line count, borrowed typography or chapter changed: start on a line. */
       React.useEffect(() => {
-        alignWindow(true)
+        snapWindow()
       }, [lines, typo, chapterText])
 
       /* Changing the height applies locally at once; the PATCH only confirms
@@ -1104,7 +1120,7 @@ window.__ModuleLoader__.load({
               ? paragraphs.map((line, position) =>
                   h(
                     'p',
-                    { key: `p${position}`, style: position === 0 ? INLINE_FIRST_PARAGRAPH_STYLE : INLINE_PARAGRAPH_STYLE },
+                    { key: `p${position}`, style: inlineParagraphStyle() },
                     line,
                   ),
                 )
@@ -1332,7 +1348,7 @@ window.__ModuleLoader__.load({
 .dnv-inlineWrap:hover .dnv-inlineExpand,.dnv-inlineExpand:focus-visible{opacity:.65}
 .dnv-inline:focus{outline:none}
 .dnv-inlineLines{position:absolute;top:0;right:22px;display:flex;gap:1px;padding:1px 2px;border:1px solid var(--dsw-alias-border-l1);border-radius:5px;background:var(--dsw-alias-bg-layer-2);opacity:0;pointer-events:none;transition:opacity .12s ease;z-index:2}
-.dnv-inlineWrap:hover .dnv-inlineLines,.dnv-inlineWrap:focus-within .dnv-inlineLines{opacity:1;pointer-events:auto}
+.dnv-inlineWrap:hover .dnv-inlineLines{opacity:1;pointer-events:auto}
 .dnv-lineBtn{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:10.5px;line-height:1;min-width:14px;height:15px;padding:0 2px;border-radius:3px;cursor:pointer}
 .dnv-lineBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dnv-lineBtn-on{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
@@ -2317,7 +2333,8 @@ window.__ModuleLoader__.load({
         stepTarget,
         windowLines,
         stepLines,
-        windowHeight,
+        inlineLineBox,
+        inlineParagraphStyle,
         css: CSS,
       },
       apply(ctx) {

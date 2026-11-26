@@ -8,7 +8,7 @@ quiet lines under the last message, in the conversation's own typography.
 
 <img width="900" alt="Novel shelf inside DeepSeek Harness" src="docs/shelf.jpg">
 
-Status: **0.1.7** — upload, shelf, reader, progress restore, rename, delete,
+Status: **0.1.8** — upload, shelf, reader, progress restore, rename, delete,
 reader prefs (font size, line height, page width, inline line count), upload
 progress, long-book
 table-of-contents grouping, empty/error/loading states, **show or open the folder
@@ -46,14 +46,19 @@ Features:
   width, **inline mode**, keyboard (← → PageUp PageDown Space j k Esc Ctrl±),
   chapter counter and a bottom progress line.
 - Inline strip: one to five lines of prose (default five), no title, no buttons, no chapter counter;
-  ← → change chapters, ↓/PageUp/PageDown/j/Space move whole lines, Esc hides it.
-  One key press never moves further than the window shows (a one-line window
-  advances one line), and the position always lands on a line boundary: the strip
-  measures the rendered paragraphs and steps by line index, so a paragraph gap can
-  never swallow a line and a half line is never left at the edge. It scrolls (the
-  whole chapter stays in the DOM) instead of cutting the text, and it reads the
-  newest assistant message's computed font/line-height/width/indent so it looks
-  like part of the conversation.
+  ← → change chapters, ↓/PageUp/PageDown/j/Space move one window forward, ↑/k one
+  window back, Esc hides it.
+  One key press moves exactly one window (a two-line window advances two lines, a
+  one-line window one line) and the position always lands on a line boundary: the
+  strip sums the rendered paragraph heights and steps by line index, so a
+  paragraph boundary is crossed exactly and no line is shown twice.
+  The window itself is a fixed box of exactly N line heights (never measured from
+  the prose), and paragraphs carry no vertical margin — only a first-line indent —
+  so every line of every paragraph sits on one uniform grid: a short paragraph can
+  never leave a blank line inside the window, and scrolling or changing chapters
+  cannot resize the strip. It scrolls (the whole chapter stays in the DOM) instead
+  of cutting the text, and it reads the newest assistant message's computed
+  font/line-height/width/indent so it looks like part of the conversation.
 - Reading position (chapter + scroll offset) and reader prefs persist on the Host,
   so they survive a reload and a restart. `/api` ports change every launch, so the
   client keeps no state of its own.
@@ -84,15 +89,25 @@ chapter counter, keyboard navigation.
 The strip has no chrome: no title, no toolbar, no chapter number. Its typography is
 copied from the newest assistant message (font size, line height, family, colour,
 column width, left indent) via `typographyFrom()`, so the prose sits on the
-same grid as the surrounding prose. Paragraph spacing matches the transcript's
-16 px.
+same grid as the surrounding prose.
 
 Hovering the strip reveals five small buttons on its top-right corner: **1–5** set
-how many lines are shown. The choice is stored as `inlineLines` in the reader
-prefs (`PATCH /prefs`, clamped to 1–5 by the Host), so it survives a reload and is
-shared with the reader tab. The window height is the distance between real line
-tops, so it always ends where a line ends; `inlineStripHeight()` (line count ×
-measured line box) is only the fallback used before the paragraphs can be measured.
+how many lines are shown. They are shown only while the pointer is over the strip;
+focusing it for the keyboard does not pin them over the text. The choice is stored
+as `inlineLines` in the reader prefs (`PATCH /prefs`, clamped to 1–5 by the Host),
+so it survives a reload and is shared with the reader tab.
+
+The window is a **fixed box**: `inlineStripHeight()` returns exactly
+`lines × line box`. Paragraphs have no vertical margin and only a 2em first-line
+indent, so a paragraph occupies whole line boxes and the next one starts right
+where the previous ended — a one-line paragraph inside a two-line window shows one
+line of itself plus one line of the next paragraph, never a blank gap. The height
+never depends on what is inside the window, which is why scrolling and chapter
+changes no longer resize the strip or shake the page.
+
+`windowLines()` divides that height by the same line box and allows a 5 % slack:
+sub-pixel layout used to report one line for an exact two-line box, which made
+every key press advance a single line and showed the bottom line twice.
 
 Mouse-wheel scrolling is never realigned: it used to be pulled onto a line top
 after the wheel stopped, which read as the page jumping a line.
@@ -251,6 +266,71 @@ These cannot be automated from here (the sandbox cannot start a browser):
 - Styles use `--dsw-alias-*` tokens only — no literal colors.
 - Keyboard shortcuts live on the reader container, never on `window`.
 - The API prefix is `/dsh-novels/api/v1`; `/api` belongs to the connection channel.
+
+## Change log
+
+Every release is summarised here; the README is part of the change, not an
+afterthought.
+
+**0.1.8**
+
+- Inline strip line count (1–5) is set from five small buttons on the strip's
+  top-right corner. They appear only while the pointer is over the strip: focusing
+  it for the keyboard used to pin them over the prose, where they hid the text.
+- The strip is a **fixed box** of exactly `lines × line box`. Paragraphs dropped
+  their vertical margin (they keep a 2em first-line indent), so every paragraph
+  occupies whole line boxes and the next one starts right below: a one-line
+  paragraph inside a two-line window shows one line of itself plus one line of the
+  next paragraph instead of a blank gap, and scrolling or switching chapters no
+  longer resizes the strip or shakes the page.
+- One key press moves exactly one window: a two-line window advances two lines
+  (it used to advance one, so the previous bottom line was shown again), a
+  five-line window advances five. The fixed three-line step is gone.
+- `windowLines()` allows a 5 % slack when dividing the height by the line box, so
+  an exact two-line window is no longer rounded down to one line.
+
+**0.1.7**
+
+- Inline window height follows the chosen line count instead of a fixed 8.4em.
+- Stepping goes by line index, so paragraph boundaries are crossed exactly; the
+  mouse wheel is never realigned after it stops.
+
+**0.1.6**
+
+- Full panel and inline strip side by side: the sidebar icon opens the shelf when
+  nothing is displayed and only closes the strip when something is; the reader has
+  an **Inline mode** button.
+
+**0.1.5**
+
+- Inline strip inside `conversation.input.dock`: five quiet lines, typography
+  copied from the newest assistant message, progress written back with the reader.
+
+**0.1.4**
+
+- Stored files are named after the book (`books/<title>.txt`), renaming renames
+  both files, duplicates become `<title> (2).txt`, and old `<id>.txt` layouts
+  migrate on start.
+
+**0.1.3**
+
+- Storage row and **Location** button: show the data folder, open it, and reveal a
+  book's `.txt` in the OS file manager (Host-side, id only from the client).
+
+**0.1.2**
+
+- `/ping` and the startup log report the installed version from `package.json`
+  instead of a hard-coded string.
+
+**0.1.1**
+
+- System font for the prose, no bold body text, and chapters whose title line was
+  printed twice no longer show it twice.
+
+**0.1.0**
+
+- First release: import, chapter split, shelf, reader, progress restore, rename,
+  delete, reader prefs (font size, line height, page width).
 
 ## License
 
